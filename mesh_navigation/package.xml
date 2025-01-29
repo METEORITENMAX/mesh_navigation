@@ -12,6 +12,7 @@
     <exec_depend>mbf_mesh_nav</exec_depend>
     <exec_depend>mesh_client</exec_depend>
     <exec_depend>mesh_controller</exec_depend>
+    <exec_depend>rl_mesh_controller</exec_depend>
     <exec_depend>mesh_layers</exec_depend>
     <exec_depend>mesh_map</exec_depend>
     <exec_depend>cvp_mesh_planner</exec_depend>

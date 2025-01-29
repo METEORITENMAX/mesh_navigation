@@ -1,0 +1,8 @@
+<library path="rl_mesh_controller">
+    <class name="rl_mesh_controller/RLMeshController" type="rl_mesh_controller::RLMeshController"
+           base_class_type="mbf_mesh_core::MeshController">
+        <description>
+            A reinforcement learning based mesh controller for mbf_mesh_nav
+        </description>
+    </class>
+</library>
