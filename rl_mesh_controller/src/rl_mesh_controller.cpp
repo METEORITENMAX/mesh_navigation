@@ -166,8 +166,20 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
     RCLCPP_ERROR(node_->get_logger(), "State vector size is not 12, it is %zu", state.size());
     return mbf_msgs::action::ExePath::Result::FAILURE;
   }
+  // 2. Calculate reward and observe next state based on the previous state and action
+  if (!previous_state_.empty() && !previous_action_.empty()) {
+    float goal_distance = (goal_pos_ - robot_pos_).length();
+    float reward = goal_distance;  // Define reward function as goal distance.
+    std::vector<float> next_state = state;  // Update based on action.
 
-  // 2. Select action (inference or exploration)
+    // Store transition in replay buffer
+    if (replay_buffer_.size() >= replay_buffer_size_) {
+      replay_buffer_.erase(replay_buffer_.begin());
+    }
+    replay_buffer_.emplace_back(previous_state_, previous_action_, reward, next_state);
+  }
+
+  // 3. Select action (inference or exploration)
   std::vector<float> action(3);
   if (training_mode_ && rand() % 100 < 20) {  // 20% exploration
     action[0] = ((float)rand() / RAND_MAX) * config_.max_lin_velocity;
@@ -183,32 +195,22 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
     action[2] = actor_output(2) * config_.max_ang_velocity;
   }
 
-  // 3. Execute action
+  // 4. Execute action
   cmd_vel.twist.linear.x = std::min(config_.max_lin_velocity, action[0] * config_.lin_vel_factor);
   cmd_vel.twist.linear.y = std::min(config_.max_lin_velocity, action[1] * config_.lin_vel_factor);
   cmd_vel.twist.angular.z = std::min(config_.max_ang_velocity, action[2] * config_.ang_vel_factor);
   cmd_vel.header.stamp = node_->now();
 
-  // cmd_vel.twist.linear.x = std::min(config_.max_lin_velocity, velocities[0] * config_.lin_vel_factor);
-  // cmd_vel.twist.angular.z = std::min(config_.max_ang_velocity, velocities[1] * config_.ang_vel_factor);
-  // cmd_vel.header.stamp = node_->now();
+  // 5. Update previous state and action
+  previous_state_ = state;
+  previous_action_ = action;
 
 
-  // 3. Execute action, get reward, and observe next state
-  // Simulate reward calculation and next state update here...
-  // float reward = -1.0f;  // Define reward function properly.
-  // std::vector<float> next_state = get_state();  // Update based on action.
-
-  // // 4. Store transition in replay buffer
-  // if (replay_buffer_.size() >= replay_buffer_size_) {
-  //   replay_buffer_.erase(replay_buffer_.begin());
-  // }
-  // replay_buffer_.emplace_back(state, action, reward, next_state);
-
-  // // 5. Train model if in training mode
-  // if (training_mode_ && replay_buffer_.size() > batch_size_) {
-  //   trainModel();
-  // }
+  // 6. Train model if in training mode
+  if (training_mode_ && replay_buffer_.size() > batch_size_) {
+    RCLCPP_ERROR_STREAM(node_->get_logger(), "Training Model");
+    trainModel();
+  }
 
   if (cancel_requested_)
   {
@@ -217,6 +219,32 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
   return mbf_msgs::action::ExePath::Result::SUCCESS;
 }
 
+void RLMeshController::trainModel()
+{
+  // Sample a batch of transitions from the replay buffer
+  std::vector<std::tuple<std::vector<float>, std::vector<float>, float, std::vector<float>>> batch;
+  std::sample(replay_buffer_.begin(), replay_buffer_.end(), std::back_inserter(batch), batch_size_, std::mt19937{std::random_device{}()});
+
+  // Prepare tensors for states, actions, rewards, and next states
+  tensorflow::Tensor states(tensorflow::DT_FLOAT, tensorflow::TensorShape({static_cast<long>(batch.size()), 12}));
+  tensorflow::Tensor actions(tensorflow::DT_FLOAT, tensorflow::TensorShape({static_cast<long>(batch.size()), 3}));
+  tensorflow::Tensor rewards(tensorflow::DT_FLOAT, tensorflow::TensorShape({static_cast<long>(batch.size()), 1}));
+  tensorflow::Tensor next_states(tensorflow::DT_FLOAT, tensorflow::TensorShape({static_cast<long>(batch.size()), 12}));
+
+  for (size_t i = 0; i < batch.size(); ++i) {
+    const auto& [state, action, reward, next_state] = batch[i];
+    std::copy(state.begin(), state.end(), &states.matrix<float>()(i, 0));
+    std::copy(action.begin(), action.end(), &actions.matrix<float>()(i, 0));
+    rewards.matrix<float>()(i, 0) = reward;
+    std::copy(next_state.begin(), next_state.end(), &next_states.matrix<float>()(i, 0));
+  }
+
+  // Train the actor-critic network
+  actor_critic_network_->Train(states, actions, rewards, next_states);
+
+  // Wipe replay buffer
+  replay_buffer_.clear();
+}
 
 bool RLMeshController::isGoalReached(double dist_tolerance, double angle_tolerance)
 {
@@ -279,12 +307,38 @@ std::vector<geometry_msgs::msg::PoseStamped> RLMeshController::calculateLookahea
     }
   }
 
+  // Ensure that we always return exactly 3 points
+  while (lookahead_points.size() < 3)
+  {
+    if (!lookahead_points.empty())
+    {
+      lookahead_points.push_back(lookahead_points.back());
+    }
+    else if (!plan.empty())
+    {
+      lookahead_points.push_back(plan.back());
+    }
+    else
+    {
+      // If the plan is empty, return a default PoseStamped
+      geometry_msgs::msg::PoseStamped default_pose;
+      lookahead_points.push_back(default_pose);
+    }
+  }
+
+  // If there are more than 3 points, truncate the list to 3 points
+  if (lookahead_points.size() > 3)
+  {
+    lookahead_points.resize(3);
+  }
+
   return lookahead_points;
 }
 
 std::vector<float> RLMeshController::get_state()
 {
   std::array<float, 12> state;
+  state.fill(1.0f);  // Initialize the array with 1.0 floats
   state[0] = robot_pos_.x;
   state[1] = robot_pos_.y;
   state[2] = robot_pos_.z;
@@ -295,16 +349,22 @@ std::vector<float> RLMeshController::get_state()
   std::vector<float> distances = {1.0, 2.0, 3.0};
   auto lookahead_points = calculateLookahead(current_plan_, distances);
 
+  if (lookahead_points.size() != 3) {
+    RCLCPP_ERROR(node_->get_logger(), "Lookahead points size is not 3, it is %zu", lookahead_points.size());
+    return std::vector<float>(state.begin(), state.end());
+  }
+
   for (size_t i = 0; i < lookahead_points.size(); ++i)
   {
     state[6 + i * 3] = lookahead_points[i].pose.position.x;
     state[7 + i * 3] = lookahead_points[i].pose.position.y;
     state[8 + i * 3] = lookahead_points[i].pose.position.z;
   }
-
-  RCLCPP_INFO(node_->get_logger(), "State: robot_pos: (%f, %f, %f), robot_dir: (%f, %f, %f), lookahead_points: (%f, %f, %f), (%f, %f, %f), (%f, %f, %f)",
-              state[0], state[1], state[2], state[3], state[4], state[5],
-              state[6], state[7], state[8], state[9], state[10], state[11]);
+  //print state size
+  //RCLCPP_INFO(node_->get_logger(), "state size: %d", state.size());
+  // RCLCPP_INFO(node_->get_logger(), "State: robot_pos: (%f, %f, %f), robot_dir: (%f, %f, %f), lookahead_points: (%f, %f, %f), (%f, %f, %f), (%f, %f, %f)",
+  //             state[0], state[1], state[2], state[3], state[4], state[5],
+  //             state[6], state[7], state[8], state[9], state[10], state[11]);
 
   return std::vector<float>(state.begin(), state.end());
 }

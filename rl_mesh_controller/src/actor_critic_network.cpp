@@ -145,3 +145,30 @@ std::vector<tensorflow::Tensor> ActorCriticNetwork::Predict(const tensorflow::Te
     }
     return outputs;
 }
+
+void ActorCriticNetwork::Train(const tensorflow::Tensor& states, const tensorflow::Tensor& actions, const tensorflow::Tensor& rewards, const tensorflow::Tensor& next_states) {
+    // Define the loss function for the actor network
+    std::vector<tensorflow::Tensor> actor_loss;
+    tensorflow::Status status = session_->Run(
+        {{"states", states}, {"actions", actions}, {"rewards", rewards}, {"next_states", next_states}},
+        {"actor_loss"},
+        {},
+        &actor_loss
+    );
+    if (!status.ok()) {
+        throw std::runtime_error("Failed to compute actor loss: " + status.ToString());
+    }
+
+    // Create an optimizer for the actor network
+    tensorflow::Tensor learning_rate(tensorflow::DT_FLOAT, tensorflow::TensorShape({}));
+    learning_rate.scalar<float>()() = 0.01;  // Example learning rate
+    status = session_->Run(
+        {{"actor_loss", actor_loss[0]}, {"learning_rate", learning_rate}},
+        {},
+        {"train_actor"},
+        nullptr
+    );
+    if (!status.ok()) {
+        throw std::runtime_error("Failed to train actor network: " + status.ToString());
+    }
+}

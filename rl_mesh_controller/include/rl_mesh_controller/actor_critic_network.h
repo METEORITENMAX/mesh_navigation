@@ -16,6 +16,8 @@ public:
     void initializeGraph();
 
     std::vector<tensorflow::Tensor> Predict(const tensorflow::Tensor& input);
+    void Train(const tensorflow::Tensor& states, const tensorflow::Tensor& actions, const tensorflow::Tensor& rewards, const tensorflow::Tensor& next_states);
+
 
 private:
     tensorflow::Session* session_;

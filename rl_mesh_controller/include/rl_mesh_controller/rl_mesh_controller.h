@@ -177,10 +177,15 @@ private:
   // torch::nn::Sequential critic_;
   std::unique_ptr<ActorCriticNetwork> actor_critic_network_;
 
+  std::vector<float> previous_state_;
+  std::vector<float> previous_action_;
+
   std::vector<std::tuple<std::vector<float>, std::vector<float>, float, std::vector<float>>> replay_buffer_;
-  size_t replay_buffer_size_ = 1000;
+  size_t replay_buffer_size_ = 100;
   size_t batch_size_ = 64;
   bool training_mode_ = true;
+
+  void trainModel();
 
   struct {
     double max_lin_velocity = 1.0;
