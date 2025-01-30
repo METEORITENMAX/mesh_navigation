@@ -160,31 +160,39 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
   float cost = map_ptr_->costAtPosition(handles, bary_coords);
   const mesh_map::Normal& mesh_normal = poseToDirectionVector(pose, tf2::Vector3(0,0,1));
   std::array<float, 2> velocities = naiveControl(robot_pos_, robot_dir_, mesh_dir, mesh_normal, cost);
-
   // 1. Extract current state
   std::vector<float> state = get_state();
+    if (state.size() != 12) {
+    RCLCPP_ERROR(node_->get_logger(), "State vector size is not 12, it is %zu", state.size());
+    return mbf_msgs::action::ExePath::Result::FAILURE;
+  }
 
   // 2. Select action (inference or exploration)
   std::vector<float> action(3);
-  // if (training_mode_ && rand() % 100 < 20) {  // 20% exploration
-  //   action[0] = ((float)rand() / RAND_MAX) * config_.max_lin_velocity;
-  //   action[1] = ((float)rand() / RAND_MAX) * config_.max_lin_velocity;
-  //   action[2] = ((float)rand() / RAND_MAX) * config_.max_ang_velocity;
-  // } else {
-  //   torch::Tensor state_tensor = torch::from_blob(state.data(), {1, (long)state.size()});
-  //   torch::Tensor action_tensor = actor_->forward(state_tensor);
-  //   action[0] = action_tensor[0][0].item<float>() * config_.max_lin_velocity;
-  //   action[1] = action_tensor[0][1].item<float>() * config_.max_lin_velocity;
-  //   action[2] = action_tensor[0][2].item<float>() * config_.max_ang_velocity;
-  // }
+  if (training_mode_ && rand() % 100 < 20) {  // 20% exploration
+    action[0] = ((float)rand() / RAND_MAX) * config_.max_lin_velocity;
+    action[1] = ((float)rand() / RAND_MAX) * config_.max_lin_velocity;
+    action[2] = ((float)rand() / RAND_MAX) * config_.max_ang_velocity;
+  } else {
+    tensorflow::Tensor state_tensor(tensorflow::DT_FLOAT, tensorflow::TensorShape({1, static_cast<long>(state.size())}));
+    std::copy(state.begin(), state.end(), state_tensor.flat<float>().data());
+    std::vector<tensorflow::Tensor> outputs = actor_critic_network_->Predict(state_tensor);
+    auto actor_output = outputs[0].flat<float>();
+    action[0] = actor_output(0) * config_.max_lin_velocity;
+    action[1] = actor_output(1) * config_.max_lin_velocity;
+    action[2] = actor_output(2) * config_.max_ang_velocity;
+  }
 
-
-  cmd_vel.twist.linear.x = std::min(config_.max_lin_velocity, velocities[0] * config_.lin_vel_factor);
-  cmd_vel.twist.angular.z = std::min(config_.max_ang_velocity, velocities[1] * config_.ang_vel_factor);
-  // cmd_vel.twist.linear.x = std::min(static_cast<float>(config_.max_lin_velocity), action[0]);
-  // cmd_vel.twist.linear.y = std::min(static_cast<float>(config_.max_lin_velocity), action[1]);
-  // cmd_vel.twist.angular.z = std::min(static_cast<float>(config_.max_ang_velocity), action[2]);
+  // 3. Execute action
+  cmd_vel.twist.linear.x = std::min(config_.max_lin_velocity, action[0] * config_.lin_vel_factor);
+  cmd_vel.twist.linear.y = std::min(config_.max_lin_velocity, action[1] * config_.lin_vel_factor);
+  cmd_vel.twist.angular.z = std::min(config_.max_ang_velocity, action[2] * config_.ang_vel_factor);
   cmd_vel.header.stamp = node_->now();
+
+  // cmd_vel.twist.linear.x = std::min(config_.max_lin_velocity, velocities[0] * config_.lin_vel_factor);
+  // cmd_vel.twist.angular.z = std::min(config_.max_ang_velocity, velocities[1] * config_.ang_vel_factor);
+  // cmd_vel.header.stamp = node_->now();
+
 
   // 3. Execute action, get reward, and observe next state
   // Simulate reward calculation and next state update here...
@@ -209,28 +217,6 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
   return mbf_msgs::action::ExePath::Result::SUCCESS;
 }
 
-void RLMeshController::trainModel()
-{
-  RCLCPP_INFO(node_->get_logger(), "Training model...");
-  // std::vector<size_t> batch_indices;
-  // while (batch_indices.size() < batch_size_) {
-  //   batch_indices.push_back(rand() % replay_buffer_.size());
-  // }
-
-  // for (size_t index : batch_indices) {
-  //   auto [state, action, reward, next_state] = replay_buffer_[index];
-
-  //   // Q-Learning Update
-  //   std::vector<float> q_values = model_.Predict(state);
-  //   std::vector<float> q_next_values = model_.Predict(next_state);
-  //   float max_q_next = *std::max_element(q_next_values.begin(), q_next_values.end());
-  //   q_values[/* action index */] = reward + gamma_ * max_q_next;
-
-  //   // Train the model
-  //   model_.Train(state, q_values, learning_rate_);
-  // }
-}
-
 
 bool RLMeshController::isGoalReached(double dist_tolerance, double angle_tolerance)
 {
@@ -247,10 +233,10 @@ bool RLMeshController::setPlan(const std::vector<geometry_msgs::msg::PoseStamped
   for (size_t i = 0; i < plan.size(); ++i)
   {
     const auto& pose = plan[i];
-    RCLCPP_INFO(node_->get_logger(), "Pose %zu: Position (x: %f, y: %f, z: %f), Orientation (x: %f, y: %f, z: %f, w: %f)",
-                i,
-                pose.pose.position.x, pose.pose.position.y, pose.pose.position.z,
-                pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w);
+    // RCLCPP_INFO(node_->get_logger(), "Pose %zu: Position (x: %f, y: %f, z: %f), Orientation (x: %f, y: %f, z: %f, w: %f)",
+    //             i,
+    //             pose.pose.position.x, pose.pose.position.y, pose.pose.position.z,
+    //             pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w);
   }
   vector_map_ = map_ptr_->getVectorMap();
   DEBUG_CALL(map_ptr_->publishDebugPoint(poseToPositionVector(plan.front()), mesh_map::color(0, 1, 0), "plan_start");)
@@ -481,243 +467,11 @@ bool RLMeshController::initialize(const std::string& plugin_name,
   reconfiguration_callback_handle_ = node_->add_on_set_parameters_callback(std::bind(
       &RLMeshController::reconfigureCallback, this, std::placeholders::_1));
 
-  RCLCPP_INFO(node_->get_logger(), "Init the rest of the controller...");
-        // Create a new TensorFlow session
-        // Create a new TensorFlow session
-        tensorflow::SessionOptions options;
-        tensorflow::Status status = tensorflow::NewSession(options, &session_);
-        if (!status.ok()) {
-            throw std::runtime_error("Failed to create TensorFlow session: " + status.ToString());
-        }
+  RCLCPP_INFO(node_->get_logger(), "Initialized Actor Critic Network");
+  // Initialize the actor-critic network
+  actor_critic_network_ = std::make_unique<ActorCriticNetwork>();
+  actor_critic_network_->initializeGraph();
 
-        // Define the graph
-        tensorflow::GraphDef graph_def;
-
-        // Define the actor network
-        tensorflow::NodeDef* input = graph_def.add_node();
-        input->set_name("input");
-        input->set_op("Placeholder");
-        (*input->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-        (*input->mutable_attr())["shape"].mutable_shape()->add_dim()->set_size(-1);
-        (*input->mutable_attr())["shape"].mutable_shape()->add_dim()->set_size(12);
-
-        tensorflow::NodeDef* actor_fc1_weights = graph_def.add_node();
-        actor_fc1_weights->set_name("actor_fc1_weights");
-        actor_fc1_weights->set_op("Const");
-        (*actor_fc1_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-        (*actor_fc1_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-        (*actor_fc1_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(12);
-        (*actor_fc1_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
-
-        tensorflow::NodeDef* actor_fc1_bias_weights = graph_def.add_node();
-        actor_fc1_bias_weights->set_name("actor_fc1_bias_weights");
-        actor_fc1_bias_weights->set_op("Const");
-        (*actor_fc1_bias_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-        (*actor_fc1_bias_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-        (*actor_fc1_bias_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
-
-        tensorflow::NodeDef* actor_fc1 = graph_def.add_node();
-        actor_fc1->set_name("actor_fc1");
-        actor_fc1->set_op("MatMul");
-        (*actor_fc1->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        actor_fc1->add_input("input");
-        actor_fc1->add_input("actor_fc1_weights");
-
-        tensorflow::NodeDef* actor_fc1_bias = graph_def.add_node();
-        actor_fc1_bias->set_name("actor_fc1_bias");
-        actor_fc1_bias->set_op("BiasAdd");
-        (*actor_fc1_bias->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        actor_fc1_bias->add_input("actor_fc1");
-        actor_fc1_bias->add_input("actor_fc1_bias_weights");
-
-        tensorflow::NodeDef* actor_fc1_relu = graph_def.add_node();
-        actor_fc1_relu->set_name("actor_fc1_relu");
-        actor_fc1_relu->set_op("Relu");
-        (*actor_fc1_relu->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        actor_fc1_relu->add_input("actor_fc1_bias");
-
-        tensorflow::NodeDef* actor_fc2_weights = graph_def.add_node();
-        actor_fc2_weights->set_name("actor_fc2_weights");
-        actor_fc2_weights->set_op("Const");
-        (*actor_fc2_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-        (*actor_fc2_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-        (*actor_fc2_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
-        (*actor_fc2_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
-
-        tensorflow::NodeDef* actor_fc2_bias_weights = graph_def.add_node();
-        actor_fc2_bias_weights->set_name("actor_fc2_bias_weights");
-        actor_fc2_bias_weights->set_op("Const");
-        (*actor_fc2_bias_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-        (*actor_fc2_bias_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-        (*actor_fc2_bias_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
-
-        tensorflow::NodeDef* actor_fc2 = graph_def.add_node();
-        actor_fc2->set_name("actor_fc2");
-        actor_fc2->set_op("MatMul");
-        (*actor_fc2->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        actor_fc2->add_input("actor_fc1_relu");
-        actor_fc2->add_input("actor_fc2_weights");
-
-        tensorflow::NodeDef* actor_fc2_bias = graph_def.add_node();
-        actor_fc2_bias->set_name("actor_fc2_bias");
-        actor_fc2_bias->set_op("BiasAdd");
-        (*actor_fc2_bias->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        actor_fc2_bias->add_input("actor_fc2");
-        actor_fc2_bias->add_input("actor_fc2_bias_weights");
-
-        tensorflow::NodeDef* actor_fc2_relu = graph_def.add_node();
-        actor_fc2_relu->set_name("actor_fc2_relu");
-        actor_fc2_relu->set_op("Relu");
-        (*actor_fc2_relu->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        actor_fc2_relu->add_input("actor_fc2_bias");
-
-        tensorflow::NodeDef* actor_output_weights = graph_def.add_node();
-        actor_output_weights->set_name("actor_output_weights");
-        actor_output_weights->set_op("Const");
-        (*actor_output_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-        (*actor_output_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-        (*actor_output_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
-        (*actor_output_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(3);
-
-        tensorflow::NodeDef* actor_output_bias_weights = graph_def.add_node();
-        actor_output_bias_weights->set_name("actor_output_bias_weights");
-        actor_output_bias_weights->set_op("Const");
-        (*actor_output_bias_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-        (*actor_output_bias_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-        (*actor_output_bias_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(3);
-
-        tensorflow::NodeDef* actor_output = graph_def.add_node();
-        actor_output->set_name("actor_output");
-        actor_output->set_op("MatMul");
-        (*actor_output->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        actor_output->add_input("actor_fc2_relu");
-        actor_output->add_input("actor_output_weights");
-
-        tensorflow::NodeDef* actor_output_bias = graph_def.add_node();
-        actor_output_bias->set_name("actor_output_bias");
-        actor_output_bias->set_op("BiasAdd");
-        (*actor_output_bias->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        actor_output_bias->add_input("actor_output");
-        actor_output_bias->add_input("actor_output_bias_weights");
-
-        tensorflow::NodeDef* actor_output_tanh = graph_def.add_node();
-        actor_output_tanh->set_name("actor_output_tanh");
-        actor_output_tanh->set_op("Tanh");
-        (*actor_output_tanh->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        actor_output_tanh->add_input("actor_output_bias");
-
-        // Define the critic network
-        tensorflow::NodeDef* critic_input = graph_def.add_node();
-        critic_input->set_name("critic_input");
-        critic_input->set_op("Placeholder");
-        (*critic_input->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-        (*critic_input->mutable_attr())["shape"].mutable_shape()->add_dim()->set_size(-1);
-        (*critic_input->mutable_attr())["shape"].mutable_shape()->add_dim()->set_size(15);
-
-        tensorflow::NodeDef* critic_fc1_weights = graph_def.add_node();
-        critic_fc1_weights->set_name("critic_fc1_weights");
-        critic_fc1_weights->set_op("Const");
-        (*critic_fc1_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-        (*critic_fc1_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-        (*critic_fc1_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(15);
-        (*critic_fc1_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
-
-        tensorflow::NodeDef* critic_fc1_bias_weights = graph_def.add_node();
-        critic_fc1_bias_weights->set_name("critic_fc1_bias_weights");
-        critic_fc1_bias_weights->set_op("Const");
-        (*critic_fc1_bias_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-        (*critic_fc1_bias_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-        (*critic_fc1_bias_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
-
-        tensorflow::NodeDef* critic_fc1 = graph_def.add_node();
-        critic_fc1->set_name("critic_fc1");
-        critic_fc1->set_op("MatMul");
-        (*critic_fc1->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        critic_fc1->add_input("critic_input");
-        critic_fc1->add_input("critic_fc1_weights");
-
-        tensorflow::NodeDef* critic_fc1_bias = graph_def.add_node();
-        critic_fc1_bias->set_name("critic_fc1_bias");
-        critic_fc1_bias->set_op("BiasAdd");
-        (*critic_fc1_bias->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        critic_fc1_bias->add_input("critic_fc1");
-        critic_fc1_bias->add_input("critic_fc1_bias_weights");
-
-        tensorflow::NodeDef* critic_fc1_relu = graph_def.add_node();
-        critic_fc1_relu->set_name("critic_fc1_relu");
-        critic_fc1_relu->set_op("Relu");
-        (*critic_fc1_relu->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        critic_fc1_relu->add_input("critic_fc1_bias");
-
-        tensorflow::NodeDef* critic_fc2_weights = graph_def.add_node();
-        critic_fc2_weights->set_name("critic_fc2_weights");
-        critic_fc2_weights->set_op("Const");
-        (*critic_fc2_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-        (*critic_fc2_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-        (*critic_fc2_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
-        (*critic_fc2_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
-
-        tensorflow::NodeDef* critic_fc2_bias_weights = graph_def.add_node();
-        critic_fc2_bias_weights->set_name("critic_fc2_bias_weights");
-        critic_fc2_bias_weights->set_op("Const");
-        (*critic_fc2_bias_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-        (*critic_fc2_bias_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-        (*critic_fc2_bias_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
-
-        tensorflow::NodeDef* critic_fc2 = graph_def.add_node();
-        critic_fc2->set_name("critic_fc2");
-        critic_fc2->set_op("MatMul");
-        (*critic_fc2->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        critic_fc2->add_input("critic_fc1_relu");
-        critic_fc2->add_input("critic_fc2_weights");
-
-        tensorflow::NodeDef* critic_fc2_bias = graph_def.add_node();
-        critic_fc2_bias->set_name("critic_fc2_bias");
-        critic_fc2_bias->set_op("BiasAdd");
-        (*critic_fc2_bias->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        critic_fc2_bias->add_input("critic_fc2");
-        critic_fc2_bias->add_input("critic_fc2_bias_weights");
-
-        tensorflow::NodeDef* critic_fc2_relu = graph_def.add_node();
-        critic_fc2_relu->set_name("critic_fc2_relu");
-        critic_fc2_relu->set_op("Relu");
-        (*critic_fc2_relu->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        critic_fc2_relu->add_input("critic_fc2_bias");
-
-        tensorflow::NodeDef* critic_output_weights = graph_def.add_node();
-        critic_output_weights->set_name("critic_output_weights");
-        critic_output_weights->set_op("Const");
-        (*critic_output_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-        (*critic_output_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-        (*critic_output_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
-        (*critic_output_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(1);
-
-        tensorflow::NodeDef* critic_output_bias_weights = graph_def.add_node();
-        critic_output_bias_weights->set_name("critic_output_bias_weights");
-        critic_output_bias_weights->set_op("Const");
-        (*critic_output_bias_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-        (*critic_output_bias_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-        (*critic_output_bias_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(1);
-
-        tensorflow::NodeDef* critic_output = graph_def.add_node();
-        critic_output->set_name("critic_output");
-        critic_output->set_op("MatMul");
-        (*critic_output->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        critic_output->add_input("critic_fc2_relu");
-        critic_output->add_input("critic_output_weights");
-
-        tensorflow::NodeDef* critic_output_bias = graph_def.add_node();
-        critic_output_bias->set_name("critic_output_bias");
-        critic_output_bias->set_op("BiasAdd");
-        (*critic_output_bias->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-        critic_output_bias->add_input("critic_output");
-        critic_output_bias->add_input("critic_output_bias_weights");
-
-        // Create the graph in the session
-        status = session_->Create(graph_def);
-        if (!status.ok()) {
-            throw std::runtime_error("Failed to create graph: " + status.ToString());
-        }
 
   return true;
 }

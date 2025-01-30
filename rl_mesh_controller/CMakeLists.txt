@@ -34,7 +34,7 @@ set(MKL_LIBRARY "/usr/lib/x86_64-linux-gnu/libmkl_rt.so")
 
 pluginlib_export_plugin_description_file(mbf_mesh_core rl_mesh_controller.xml)
 
-add_library(${PROJECT_NAME} src/rl_mesh_controller.cpp)
+add_library(${PROJECT_NAME} src/rl_mesh_controller.cpp src/actor_critic_network.cpp)
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>

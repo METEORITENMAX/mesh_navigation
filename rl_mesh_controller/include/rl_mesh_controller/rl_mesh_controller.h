@@ -14,7 +14,7 @@
 #include <tensorflow/core/platform/env.h>
 #include <iostream>
 #include <vector>
-
+#include "actor_critic_network.h"
 
 namespace rl_mesh_controller
 {
@@ -175,8 +175,8 @@ private:
 
   // torch::nn::Sequential actor_;
   // torch::nn::Sequential critic_;
-  tensorflow::Session* session_;
-  void trainModel();
+  std::unique_ptr<ActorCriticNetwork> actor_critic_network_;
+
   std::vector<std::tuple<std::vector<float>, std::vector<float>, float, std::vector<float>>> replay_buffer_;
   size_t replay_buffer_size_ = 1000;
   size_t batch_size_ = 64;
