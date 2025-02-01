@@ -5,6 +5,10 @@
 #include <tensorflow/core/framework/tensor.h>
 #include <tensorflow/core/framework/graph.pb.h>
 #include <tensorflow/core/platform/env.h>
+
+#include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/cc/client/client_session.h"
+
 #include <iostream>
 #include <vector>
 

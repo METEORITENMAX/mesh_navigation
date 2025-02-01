@@ -1,4 +1,7 @@
 #include "rl_mesh_controller/actor_critic_network.h"
+#include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/cc/ops/training_ops.h"
+#include "tensorflow/cc/framework/gradients.h"
 
 ActorCriticNetwork::ActorCriticNetwork() {
     // Create a new TensorFlow session
@@ -14,132 +17,71 @@ ActorCriticNetwork::~ActorCriticNetwork() {
 }
 
 void ActorCriticNetwork::initializeGraph() {
-    // Define the graph
-    tensorflow::GraphDef graph_def;
+    try {
+        // Define the computational graph
+        tensorflow::Scope root = tensorflow::Scope::NewRootScope();
 
-    // Define the actor network
-    tensorflow::NodeDef* input = graph_def.add_node();
-    input->set_name("input");
-    input->set_op("Placeholder");
-    (*input->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-    (*input->mutable_attr())["shape"].mutable_shape()->add_dim()->set_size(-1);
-    (*input->mutable_attr())["shape"].mutable_shape()->add_dim()->set_size(12);
+        // Define placeholders
+        auto states = tensorflow::ops::Placeholder(root.WithOpName("states"), tensorflow::DT_FLOAT);
+        auto actions = tensorflow::ops::Placeholder(root.WithOpName("actions"), tensorflow::DT_FLOAT);
+        auto rewards = tensorflow::ops::Placeholder(root.WithOpName("rewards"), tensorflow::DT_FLOAT);
+        auto next_states = tensorflow::ops::Placeholder(root.WithOpName("next_states"), tensorflow::DT_FLOAT);
 
-    tensorflow::NodeDef* actor_fc1_weights = graph_def.add_node();
-    actor_fc1_weights->set_name("actor_fc1_weights");
-    actor_fc1_weights->set_op("Const");
-    (*actor_fc1_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-    (*actor_fc1_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-    (*actor_fc1_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(12);
-    (*actor_fc1_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
+        // Define actor network layers (simplified)
+        auto fc1_weights = tensorflow::ops::Variable(root.WithOpName("fc1_weights"), {12, 256}, tensorflow::DT_FLOAT);
+        auto fc1_init = tensorflow::ops::Assign(root.WithOpName("fc1_init"), fc1_weights, tensorflow::ops::RandomNormal(root, {12, 256}, tensorflow::DT_FLOAT));
+        auto fc1 = tensorflow::ops::MatMul(root.WithOpName("fc1"), states, fc1_weights);
+        auto fc1_relu = tensorflow::ops::Relu(root.WithOpName("fc1_relu"), fc1);
 
-    tensorflow::NodeDef* actor_fc1_bias_weights = graph_def.add_node();
-    actor_fc1_bias_weights->set_name("actor_fc1_bias_weights");
-    actor_fc1_bias_weights->set_op("Const");
-    (*actor_fc1_bias_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-    (*actor_fc1_bias_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-    (*actor_fc1_bias_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
+        auto fc2_weights = tensorflow::ops::Variable(root.WithOpName("fc2_weights"), {256, 3}, tensorflow::DT_FLOAT);
+        auto fc2_init = tensorflow::ops::Assign(root.WithOpName("fc2_init"), fc2_weights, tensorflow::ops::RandomNormal(root, {256, 3}, tensorflow::DT_FLOAT));
+        auto fc2 = tensorflow::ops::MatMul(root.WithOpName("fc2"), fc1_relu, fc2_weights);
+        auto actor_output = tensorflow::ops::Tanh(root.WithOpName("actor_output"), fc2);
 
-    tensorflow::NodeDef* actor_fc1 = graph_def.add_node();
-    actor_fc1->set_name("actor_fc1");
-    actor_fc1->set_op("MatMul");
-    (*actor_fc1->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-    actor_fc1->add_input("input");
-    actor_fc1->add_input("actor_fc1_weights");
+        // Define loss function
+        auto squared_diff = tensorflow::ops::SquaredDifference(root.WithOpName("squared_diff"), actions, actor_output);
+        auto actor_loss = tensorflow::ops::Mean(root.WithOpName("actor_loss"), squared_diff, {0});
 
-    tensorflow::NodeDef* actor_fc1_bias = graph_def.add_node();
-    actor_fc1_bias->set_name("actor_fc1_bias");
-    actor_fc1_bias->set_op("BiasAdd");
-    (*actor_fc1_bias->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-    actor_fc1_bias->add_input("actor_fc1");
-    actor_fc1_bias->add_input("actor_fc1_bias_weights");
+        // Define optimizer manually
+        auto learning_rate = tensorflow::ops::Const(root.WithOpName("learning_rate"), 0.01f, {});
+        std::vector<tensorflow::Output> grad_outputs;
+        tensorflow::Status status = tensorflow::AddSymbolicGradients(root, {actor_loss}, {fc1_weights, fc2_weights}, &grad_outputs);
+        if (!status.ok()) {
+            throw std::runtime_error("Failed to add symbolic gradients: " + status.ToString());
+        }
+        auto apply_gradients_fc1 = tensorflow::ops::ApplyGradientDescent(root.WithOpName("apply_gradients_fc1"), fc1_weights, learning_rate, grad_outputs[0]);
+        auto apply_gradients_fc2 = tensorflow::ops::ApplyGradientDescent(root.WithOpName("apply_gradients_fc2"), fc2_weights, learning_rate, grad_outputs[1]);
 
-    tensorflow::NodeDef* actor_fc1_relu = graph_def.add_node();
-    actor_fc1_relu->set_name("actor_fc1_relu");
-    actor_fc1_relu->set_op("Relu");
-    (*actor_fc1_relu->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-    actor_fc1_relu->add_input("actor_fc1_bias");
+        // Create session
+        tensorflow::GraphDef graph_def;
+        status = root.ToGraphDef(&graph_def);
+        if (!status.ok()) {
+            throw std::runtime_error("Failed to create graph: " + status.ToString());
+        }
 
-    tensorflow::NodeDef* actor_fc2_weights = graph_def.add_node();
-    actor_fc2_weights->set_name("actor_fc2_weights");
-    actor_fc2_weights->set_op("Const");
-    (*actor_fc2_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-    (*actor_fc2_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-    (*actor_fc2_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
-    (*actor_fc2_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
+        status = session_->Create(graph_def);
+        if (!status.ok()) {
+            throw std::runtime_error("Failed to create session: " + status.ToString());
+        }
 
-    tensorflow::NodeDef* actor_fc2_bias_weights = graph_def.add_node();
-    actor_fc2_bias_weights->set_name("actor_fc2_bias_weights");
-    actor_fc2_bias_weights->set_op("Const");
-    (*actor_fc2_bias_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-    (*actor_fc2_bias_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-    (*actor_fc2_bias_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
-
-    tensorflow::NodeDef* actor_fc2 = graph_def.add_node();
-    actor_fc2->set_name("actor_fc2");
-    actor_fc2->set_op("MatMul");
-    (*actor_fc2->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-    actor_fc2->add_input("actor_fc1_relu");
-    actor_fc2->add_input("actor_fc2_weights");
-
-    tensorflow::NodeDef* actor_fc2_bias = graph_def.add_node();
-    actor_fc2_bias->set_name("actor_fc2_bias");
-    actor_fc2_bias->set_op("BiasAdd");
-    (*actor_fc2_bias->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-    actor_fc2_bias->add_input("actor_fc2");
-    actor_fc2_bias->add_input("actor_fc2_bias_weights");
-
-    tensorflow::NodeDef* actor_fc2_relu = graph_def.add_node();
-    actor_fc2_relu->set_name("actor_fc2_relu");
-    actor_fc2_relu->set_op("Relu");
-    (*actor_fc2_relu->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-    actor_fc2_relu->add_input("actor_fc2_bias");
-
-    tensorflow::NodeDef* actor_output_weights = graph_def.add_node();
-    actor_output_weights->set_name("actor_output_weights");
-    actor_output_weights->set_op("Const");
-    (*actor_output_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-    (*actor_output_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-    (*actor_output_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(256);
-    (*actor_output_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(3);
-
-    tensorflow::NodeDef* actor_output_bias_weights = graph_def.add_node();
-    actor_output_bias_weights->set_name("actor_output_bias_weights");
-    actor_output_bias_weights->set_op("Const");
-    (*actor_output_bias_weights->mutable_attr())["dtype"].set_type(tensorflow::DT_FLOAT);
-    (*actor_output_bias_weights->mutable_attr())["value"].mutable_tensor()->set_dtype(tensorflow::DT_FLOAT);
-    (*actor_output_bias_weights->mutable_attr())["value"].mutable_tensor()->mutable_tensor_shape()->add_dim()->set_size(3);
-
-    tensorflow::NodeDef* actor_output = graph_def.add_node();
-    actor_output->set_name("actor_output");
-    actor_output->set_op("MatMul");
-    (*actor_output->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-    actor_output->add_input("actor_fc2_relu");
-    actor_output->add_input("actor_output_weights");
-
-    tensorflow::NodeDef* actor_output_bias = graph_def.add_node();
-    actor_output_bias->set_name("actor_output_bias");
-    actor_output_bias->set_op("BiasAdd");
-    (*actor_output_bias->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-    actor_output_bias->add_input("actor_output");
-    actor_output_bias->add_input("actor_output_bias_weights");
-
-    tensorflow::NodeDef* actor_output_tanh = graph_def.add_node();
-    actor_output_tanh->set_name("actor_output_tanh");
-    actor_output_tanh->set_op("Tanh");
-    (*actor_output_tanh->mutable_attr())["T"].set_type(tensorflow::DT_FLOAT);
-    actor_output_tanh->add_input("actor_output_bias");
-
-    // Create the graph in the session
-    tensorflow::Status status = session_->Create(graph_def);
-    if (!status.ok()) {
-        throw std::runtime_error("Failed to create graph: " + status.ToString());
+        // Run variable initialization
+        std::vector<std::pair<std::string, tensorflow::Tensor>> feed_dict = {
+            {"states", tensorflow::Tensor(tensorflow::DT_FLOAT, tensorflow::TensorShape({1, 12}))},
+            {"actions", tensorflow::Tensor(tensorflow::DT_FLOAT, tensorflow::TensorShape({1, 3}))},
+            {"rewards", tensorflow::Tensor(tensorflow::DT_FLOAT, tensorflow::TensorShape({1}))},
+            {"next_states", tensorflow::Tensor(tensorflow::DT_FLOAT, tensorflow::TensorShape({1, 12}))}
+        };
+        status = session_->Run(feed_dict, {}, {"fc1_init", "fc2_init"}, nullptr);
+        if (!status.ok()) {
+            throw std::runtime_error("Failed to initialize variables: " + status.ToString());
+        }
+    } catch (const std::runtime_error& e) {
+        std::cerr << "Error during graph initialization: " << e.what() << std::endl;
     }
 }
-
 std::vector<tensorflow::Tensor> ActorCriticNetwork::Predict(const tensorflow::Tensor& input) {
     std::vector<tensorflow::Tensor> outputs;
-    tensorflow::Status status = session_->Run({{"input", input}}, {"actor_output_tanh"}, {}, &outputs);
+    tensorflow::Status status = session_->Run({{"states", input}}, {"actor_output"}, {}, &outputs);
     if (!status.ok()) {
         throw std::runtime_error("Failed to run session: " + status.ToString());
     }
@@ -147,27 +89,39 @@ std::vector<tensorflow::Tensor> ActorCriticNetwork::Predict(const tensorflow::Te
 }
 
 void ActorCriticNetwork::Train(const tensorflow::Tensor& states, const tensorflow::Tensor& actions, const tensorflow::Tensor& rewards, const tensorflow::Tensor& next_states) {
-    // Define the loss function for the actor network
+    // Ensure all inputs are provided to the session
+    std::vector<std::pair<std::string, tensorflow::Tensor>> feed_dict = {
+        {"states", states},
+        {"actions", actions},
+        {"rewards", rewards},
+        {"next_states", next_states}
+    };
+
     std::vector<tensorflow::Tensor> actor_loss;
     tensorflow::Status status = session_->Run(
-        {{"states", states}, {"actions", actions}, {"rewards", rewards}, {"next_states", next_states}},
+        feed_dict,
         {"actor_loss"},
         {},
         &actor_loss
     );
+
     if (!status.ok()) {
         throw std::runtime_error("Failed to compute actor loss: " + status.ToString());
     }
 
-    // Create an optimizer for the actor network
     tensorflow::Tensor learning_rate(tensorflow::DT_FLOAT, tensorflow::TensorShape({}));
-    learning_rate.scalar<float>()() = 0.01;  // Example learning rate
+    learning_rate.scalar<float>()() = 0.01;
+
+    feed_dict.push_back({"learning_rate", learning_rate});
+    feed_dict.push_back({"actor_loss", actor_loss[0]});
+
     status = session_->Run(
-        {{"actor_loss", actor_loss[0]}, {"learning_rate", learning_rate}},
+        feed_dict,
         {},
-        {"train_actor"},
+        {"apply_gradients_fc1", "apply_gradients_fc2"},
         nullptr
     );
+
     if (!status.ok()) {
         throw std::runtime_error("Failed to train actor network: " + status.ToString());
     }

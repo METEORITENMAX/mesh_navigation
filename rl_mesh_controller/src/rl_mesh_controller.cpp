@@ -160,17 +160,34 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
   float cost = map_ptr_->costAtPosition(handles, bary_coords);
   const mesh_map::Normal& mesh_normal = poseToDirectionVector(pose, tf2::Vector3(0,0,1));
   std::array<float, 2> velocities = naiveControl(robot_pos_, robot_dir_, mesh_dir, mesh_normal, cost);
+
   // 1. Extract current state
   std::vector<float> state = get_state();
-    if (state.size() != 12) {
+
+  // Ensure the state vector has exactly 12 elements
+  if (state.size() != 12) {
     RCLCPP_ERROR(node_->get_logger(), "State vector size is not 12, it is %zu", state.size());
     return mbf_msgs::action::ExePath::Result::FAILURE;
   }
+
   // 2. Calculate reward and observe next state based on the previous state and action
   if (!previous_state_.empty() && !previous_action_.empty()) {
-    float goal_distance = (goal_pos_ - robot_pos_).length();
-    float reward = goal_distance;  // Define reward function as goal distance.
-    std::vector<float> next_state = state;  // Update based on action.
+    float initial_distance = (goal_pos_ - robot_pos_).length();
+    float reward = 0.0f;
+
+    // Execute action to get new state
+    cmd_vel.twist.linear.x = std::min(config_.max_lin_velocity, previous_action_[0] * config_.lin_vel_factor);
+    cmd_vel.twist.linear.y = std::min(config_.max_lin_velocity, previous_action_[1] * config_.lin_vel_factor);
+    cmd_vel.twist.angular.z = std::min(config_.max_ang_velocity, previous_action_[2] * config_.ang_vel_factor);
+    cmd_vel.header.stamp = node_->now();
+
+    // Update robot position based on action (this is a placeholder, you need to update robot_pos_ based on actual movement)
+    // robot_pos_ = ...;
+
+    float new_distance = (goal_pos_ - robot_pos_).length();
+    reward = initial_distance - new_distance;  // Positive reward if distance decreases
+
+    std::vector<float> next_state = state;  // Update based on action
 
     // Store transition in replay buffer
     if (replay_buffer_.size() >= replay_buffer_size_) {
@@ -205,10 +222,9 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
   previous_state_ = state;
   previous_action_ = action;
 
-
   // 6. Train model if in training mode
   if (training_mode_ && replay_buffer_.size() > batch_size_) {
-    RCLCPP_ERROR_STREAM(node_->get_logger(), "Training Model");
+    RCLCPP_INFO_STREAM(node_->get_logger(), "Training Model");
     trainModel();
   }
 
@@ -221,6 +237,8 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
 
 void RLMeshController::trainModel()
 {
+  RCLCPP_INFO(node_->get_logger(), "Starting training model");
+
   // Sample a batch of transitions from the replay buffer
   std::vector<std::tuple<std::vector<float>, std::vector<float>, float, std::vector<float>>> batch;
   std::sample(replay_buffer_.begin(), replay_buffer_.end(), std::back_inserter(batch), batch_size_, std::mt19937{std::random_device{}()});
@@ -239,11 +257,23 @@ void RLMeshController::trainModel()
     std::copy(next_state.begin(), next_state.end(), &next_states.matrix<float>()(i, 0));
   }
 
+  // Log tensor shapes for debugging
+  RCLCPP_INFO(node_->get_logger(), "States tensor shape: [%ld, %ld]", states.shape().dim_size(0), states.shape().dim_size(1));
+  RCLCPP_INFO(node_->get_logger(), "Actions tensor shape: [%ld, %ld]", actions.shape().dim_size(0), actions.shape().dim_size(1));
+  RCLCPP_INFO(node_->get_logger(), "Rewards tensor shape: [%ld, %ld]", rewards.shape().dim_size(0), rewards.shape().dim_size(1));
+  RCLCPP_INFO(node_->get_logger(), "Next states tensor shape: [%ld, %ld]", next_states.shape().dim_size(0), next_states.shape().dim_size(1));
+
   // Train the actor-critic network
-  actor_critic_network_->Train(states, actions, rewards, next_states);
+  try {
+    actor_critic_network_->Train(states, actions, rewards, next_states);
+  } catch (const std::runtime_error& e) {
+    RCLCPP_ERROR(node_->get_logger(), "Failed to train model: %s", e.what());
+    throw;
+  }
 
   // Wipe replay buffer
   replay_buffer_.clear();
+  RCLCPP_INFO(node_->get_logger(), "Finished training model");
 }
 
 bool RLMeshController::isGoalReached(double dist_tolerance, double angle_tolerance)
