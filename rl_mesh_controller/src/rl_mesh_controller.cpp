@@ -172,44 +172,48 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
 
   // 2. Calculate reward and observe next state based on the previous state and action
   if (!previous_state_.empty() && !previous_action_.empty()) {
-    float initial_distance = (goal_pos_ - robot_pos_).length();
-    float reward = 0.0f;
+      float initial_distance = last_goal_distance_;
+      float reward = 0.0f;
 
-    // Execute action to get new state
-    cmd_vel.twist.linear.x = std::min(config_.max_lin_velocity, previous_action_[0] * config_.lin_vel_factor);
-    cmd_vel.twist.linear.y = std::min(config_.max_lin_velocity, previous_action_[1] * config_.lin_vel_factor);
-    cmd_vel.twist.angular.z = std::min(config_.max_ang_velocity, previous_action_[2] * config_.ang_vel_factor);
-    cmd_vel.header.stamp = node_->now();
+      // Calculate new distance
+      float new_distance = (goal_pos_ - robot_pos_).length();
+      reward = initial_distance - new_distance;  // Positive reward if distance decreases
 
-    // Update robot position based on action (this is a placeholder, you need to update robot_pos_ based on actual movement)
-    // robot_pos_ = ...;
+      std::vector<float> next_state = state;  // Update based on action
 
-    float new_distance = (goal_pos_ - robot_pos_).length();
-    reward = initial_distance - new_distance;  // Positive reward if distance decreases
-
-    std::vector<float> next_state = state;  // Update based on action
-
-    // Store transition in replay buffer
-    if (replay_buffer_.size() >= replay_buffer_size_) {
-      replay_buffer_.erase(replay_buffer_.begin());
-    }
-    replay_buffer_.emplace_back(previous_state_, previous_action_, reward, next_state);
+      // Store transition in replay buffer
+      if (replay_buffer_.size() >= replay_buffer_size_) {
+          replay_buffer_.erase(replay_buffer_.begin());
+      }
+      replay_buffer_.emplace_back(previous_state_, previous_action_, reward, next_state);
   }
 
   // 3. Select action (inference or exploration)
   std::vector<float> action(3);
-  if (training_mode_ && rand() % 100 < 20) {  // 20% exploration
-    action[0] = ((float)rand() / RAND_MAX) * config_.max_lin_velocity;
-    action[1] = ((float)rand() / RAND_MAX) * config_.max_lin_velocity;
-    action[2] = ((float)rand() / RAND_MAX) * config_.max_ang_velocity;
+  if (training_mode_ && rand() % 100 < 40) {  // 40% exploration
+      if (rand() % 2 == 0) {  // 50% chance to use linear velocities
+          action[0] = ((float)rand() / RAND_MAX) * config_.max_lin_velocity;
+          action[1] = ((float)rand() / RAND_MAX) * config_.max_lin_velocity;
+          action[2] = 0.0f;  // No angular velocity
+      } else {  // 50% chance to use angular velocity
+          action[0] = 0.0f;  // No linear velocity
+          action[1] = 0.0f;  // No linear velocity
+          action[2] = ((float)rand() / RAND_MAX) * config_.max_ang_velocity;
+      }
   } else {
-    tensorflow::Tensor state_tensor(tensorflow::DT_FLOAT, tensorflow::TensorShape({1, static_cast<long>(state.size())}));
-    std::copy(state.begin(), state.end(), state_tensor.flat<float>().data());
-    std::vector<tensorflow::Tensor> outputs = actor_critic_network_->Predict(state_tensor);
-    auto actor_output = outputs[0].flat<float>();
-    action[0] = actor_output(0) * config_.max_lin_velocity;
-    action[1] = actor_output(1) * config_.max_lin_velocity;
-    action[2] = actor_output(2) * config_.max_ang_velocity;
+      tensorflow::Tensor state_tensor(tensorflow::DT_FLOAT, tensorflow::TensorShape({1, static_cast<long>(state.size())}));
+      std::copy(state.begin(), state.end(), state_tensor.flat<float>().data());
+      std::vector<tensorflow::Tensor> outputs = actor_critic_network_->Predict(state_tensor);
+      auto actor_output = outputs[0].flat<float>();
+      if (rand() % 2 == 0) {  // 50% chance to use linear velocities
+          action[0] = actor_output(0) * config_.max_lin_velocity;
+          action[1] = actor_output(1) * config_.max_lin_velocity;
+          action[2] = 0.0f;  // No angular velocity
+      } else {  // 50% chance to use angular velocity
+          action[0] = 0.0f;  // No linear velocity
+          action[1] = 0.0f;  // No linear velocity
+          action[2] = actor_output(2) * config_.max_ang_velocity;
+      }
   }
 
   // 4. Execute action
@@ -221,7 +225,7 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
   // 5. Update previous state and action
   previous_state_ = state;
   previous_action_ = action;
-
+  last_goal_distance_ = (goal_pos_ - robot_pos_).length();
   // 6. Train model if in training mode
   if (training_mode_ && replay_buffer_.size() > batch_size_) {
     RCLCPP_INFO_STREAM(node_->get_logger(), "Training Model");
