@@ -3,7 +3,7 @@
 #include "tensorflow/cc/ops/training_ops.h"
 #include "tensorflow/cc/framework/gradients.h"
 
-ActorCriticNetwork::ActorCriticNetwork() {
+ActorCriticNetwork::ActorCriticNetwork()  : root(tensorflow::Scope::NewRootScope()) {
     // Create a new TensorFlow session
     tensorflow::SessionOptions options;
     tensorflow::Status status = tensorflow::NewSession(options, &session_);
@@ -13,13 +13,19 @@ ActorCriticNetwork::ActorCriticNetwork() {
 }
 
 ActorCriticNetwork::~ActorCriticNetwork() {
-    session_->Close();
+
+
+    // Close the session
+    tensorflow::Status status = session_->Close();
+    if (!status.ok()) {
+        std::cerr << "Failed to close TensorFlow session: " + status.ToString() << std::endl;
+    }
 }
 
 void ActorCriticNetwork::initializeGraph() {
     try {
         // Define the computational graph
-        tensorflow::Scope root = tensorflow::Scope::NewRootScope();
+        root = tensorflow::Scope::NewRootScope();
 
         // Define placeholders
         auto states = tensorflow::ops::Placeholder(root.WithOpName("states"), tensorflow::DT_FLOAT);
@@ -53,13 +59,12 @@ void ActorCriticNetwork::initializeGraph() {
         auto apply_gradients_fc2 = tensorflow::ops::ApplyGradientDescent(root.WithOpName("apply_gradients_fc2"), fc2_weights, learning_rate, grad_outputs[1]);
 
         // Create session
-        tensorflow::GraphDef graph_def;
-        status = root.ToGraphDef(&graph_def);
+        status = root.ToGraphDef(&graph_def_);
         if (!status.ok()) {
             throw std::runtime_error("Failed to create graph: " + status.ToString());
         }
 
-        status = session_->Create(graph_def);
+        status = session_->Create(graph_def_);
         if (!status.ok()) {
             throw std::runtime_error("Failed to create session: " + status.ToString());
         }
@@ -110,7 +115,7 @@ void ActorCriticNetwork::Train(const tensorflow::Tensor& states, const tensorflo
     }
 
     tensorflow::Tensor learning_rate(tensorflow::DT_FLOAT, tensorflow::TensorShape({}));
-    learning_rate.scalar<float>()() = 0.01;
+    learning_rate.scalar<float>()() = 0.001;
 
     feed_dict.push_back({"learning_rate", learning_rate});
     feed_dict.push_back({"actor_loss", actor_loss[0]});
@@ -124,5 +129,96 @@ void ActorCriticNetwork::Train(const tensorflow::Tensor& states, const tensorflo
 
     if (!status.ok()) {
         throw std::runtime_error("Failed to train actor network: " + status.ToString());
+    }
+}
+
+void ActorCriticNetwork::SaveGraph(tensorflow::Session* session, const std::string& export_path) {
+    tensorflow::GraphDef graph_def;
+    tensorflow::Status status = root.ToGraphDef(&graph_def);
+    if (!status.ok()) {
+        std::cerr << "Error obtaining graph definition: " << status.ToString() << std::endl;
+        return;
+    }
+    status = tensorflow::WriteTextProto(tensorflow::Env::Default(), export_path, graph_def);
+    if (!status.ok()) {
+        std::cerr << "Error saving graph: " << status.ToString() << std::endl;
+    } else {
+        std::cout << "Graph saved successfully to " << export_path << std::endl;
+    }
+}
+
+void ActorCriticNetwork::SaveWeights(tensorflow::Session* session, const std::string& export_path) {
+    std::vector<tensorflow::Tensor> output_tensors;
+    tensorflow::Status status = session->Run({}, {"fc1_weights", "fc2_weights"}, {}, &output_tensors);
+    if (!status.ok()) {
+        std::cerr << "Error running session to get weights: " << status.ToString() << std::endl;
+        return;
+    }
+
+    tensorflow::checkpoint::TensorSliceWriter writer(export_path, tensorflow::checkpoint::CreateTableTensorSliceBuilder);
+    for (size_t i = 0; i < output_tensors.size(); ++i) {
+        const tensorflow::Tensor& tensor = output_tensors[i];
+        tensorflow::TensorShape shape = tensor.shape();
+        tensorflow::TensorSlice slice = tensorflow::TensorSlice::ParseOrDie("-:-");
+        status = writer.Add("fc" + std::to_string(i + 1) + "_weights", shape, slice, tensor.flat<float>().data());
+        if (!status.ok()) {
+            std::cerr << "Error adding tensor to writer: " << status.ToString() << std::endl;
+            return;
+        }
+    }
+
+    status = writer.Finish();
+    if (!status.ok()) {
+        std::cerr << "Error finishing writer: " << status.ToString() << std::endl;
+    } else {
+        std::cout << "Weights saved successfully to " << export_path << std::endl;
+    }
+}
+
+void ActorCriticNetwork::SaveModel() {
+    // Verzeichnis für das Modell definieren
+    std::string export_dir = "/tmp/tensorflow_model";  // Speicherort anpassen
+
+    // Erstelle das Verzeichnis falls es nicht existiert
+    struct stat info;
+    if (stat(export_dir.c_str(), &info) != 0) {
+        if (mkdir(export_dir.c_str(), 0777) == -1) {
+            std::cerr << "Error creating directory: " << strerror(errno) << std::endl;
+            return;
+        }
+    }
+
+    // Checkpoint-Dateiname definieren
+    std::string checkpoint_prefix = export_dir + "/model_checkpoint";
+
+    // Tensor für den Speicherpfad erstellen
+    tensorflow::Tensor checkpoint_tensor(tensorflow::DT_STRING, tensorflow::TensorShape({}));
+    checkpoint_tensor.scalar<tensorflow::tstring>()() = checkpoint_prefix;
+
+    // Speicheroperation korrekt definieren
+    auto tensor_names = tensorflow::ops::Const(root.WithOpName("tensor_names"),
+                                               {"fc1_weights", "fc2_weights"},
+                                               tensorflow::TensorShape({2}));
+
+    auto save_op = tensorflow::ops::Save(root.WithOpName("save_op"),
+                                         checkpoint_tensor,
+                                         tensor_names,
+                                         {fc1_weights, fc2_weights});
+
+
+    checkpoint_tensor.scalar<tensorflow::tstring>()() = "/tmp/tensorflow_model/model.ckpt";
+    tensorflow::Status status;
+    status = session_->Run(
+        {{"save/Const", checkpoint_tensor}},
+        {},
+        {"save/control_dependency"},
+        nullptr
+    );
+
+
+    if (!status.ok()) {
+        std::cerr << "Error saving model: " << status.ToString() << std::endl;
+    } else {
+        std::cout << "Model saved successfully at " << checkpoint_prefix << std::endl;
     }
 }

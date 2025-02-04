@@ -190,7 +190,7 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
 
   // 3. Select action (inference or exploration)
   std::vector<float> action(3);
-  if (training_mode_ && rand() % 100 < 40) {  // 40% exploration
+  if (training_mode_ && rand() % 100 < exploration_threshold_) {  // 40% exploration
       if (rand() % 2 == 0) {  // 50% chance to use linear velocities
           action[0] = ((float)rand() / RAND_MAX) * config_.max_lin_velocity;
           action[1] = ((float)rand() / RAND_MAX) * config_.max_lin_velocity;
@@ -242,7 +242,7 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
 void RLMeshController::trainModel()
 {
   RCLCPP_INFO(node_->get_logger(), "Starting training model");
-
+  exploration_threshold_ *= 0.8;  // Decay exploration threshold
   // Sample a batch of transitions from the replay buffer
   std::vector<std::tuple<std::vector<float>, std::vector<float>, float, std::vector<float>>> batch;
   std::sample(replay_buffer_.begin(), replay_buffer_.end(), std::back_inserter(batch), batch_size_, std::mt19937{std::random_device{}()});
@@ -266,7 +266,7 @@ void RLMeshController::trainModel()
   RCLCPP_INFO(node_->get_logger(), "Actions tensor shape: [%ld, %ld]", actions.shape().dim_size(0), actions.shape().dim_size(1));
   RCLCPP_INFO(node_->get_logger(), "Rewards tensor shape: [%ld, %ld]", rewards.shape().dim_size(0), rewards.shape().dim_size(1));
   RCLCPP_INFO(node_->get_logger(), "Next states tensor shape: [%ld, %ld]", next_states.shape().dim_size(0), next_states.shape().dim_size(1));
-
+  RCLCPP_INFO(node_->get_logger(), "Exploration rate: [%f]", exploration_threshold_);
   // Train the actor-critic network
   try {
     actor_critic_network_->Train(states, actions, rewards, next_states);
@@ -276,6 +276,7 @@ void RLMeshController::trainModel()
   }
 
   // Wipe replay buffer
+  actor_critic_network_->SaveModel();
   replay_buffer_.clear();
   RCLCPP_INFO(node_->get_logger(), "Finished training model");
 }
@@ -565,6 +566,7 @@ bool RLMeshController::initialize(const std::string& plugin_name,
   // Initialize the actor-critic network
   actor_critic_network_ = std::make_unique<ActorCriticNetwork>();
   actor_critic_network_->initializeGraph();
+  exploration_threshold_ = 40.0;  // 40% exploration
 
 
   return true;

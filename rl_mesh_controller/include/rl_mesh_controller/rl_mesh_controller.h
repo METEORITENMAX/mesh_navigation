@@ -183,10 +183,11 @@ private:
   std::vector<float> previous_state_;
   std::vector<float> previous_action_;
   float last_goal_distance_;
+  float exploration_threshold_;
 
   std::vector<std::tuple<std::vector<float>, std::vector<float>, float, std::vector<float>>> replay_buffer_;
-  size_t replay_buffer_size_ = 100;
-  size_t batch_size_ = 64;
+  size_t replay_buffer_size_ = 512;
+  size_t batch_size_ = 128;
   bool training_mode_ = true;
 
   void trainModel();
