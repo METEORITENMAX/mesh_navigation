@@ -176,10 +176,16 @@ void ActorCriticNetwork::SaveWeights(tensorflow::Session* session, const std::st
 }
 
 void ActorCriticNetwork::SaveModel() {
-    // Verzeichnis für das Modell definieren
-    std::string export_dir = "/tmp/tensorflow_model";  // Speicherort anpassen
+    // Get the home directory
+    const char* home_dir = getenv("HOME");
+    if (!home_dir) {
+        home_dir = getpwuid(getuid())->pw_dir;
+    }
 
-    // Erstelle das Verzeichnis falls es nicht existiert
+    // Define the export directory
+    std::string export_dir = std::string(home_dir) + "/tensor_models";
+
+    // Create the directory if it doesn't exist
     struct stat info;
     if (stat(export_dir.c_str(), &info) != 0) {
         if (mkdir(export_dir.c_str(), 0777) == -1) {
@@ -188,14 +194,14 @@ void ActorCriticNetwork::SaveModel() {
         }
     }
 
-    // Checkpoint-Dateiname definieren
+    // Define the checkpoint prefix
     std::string checkpoint_prefix = export_dir + "/model_checkpoint";
 
-    // Tensor für den Speicherpfad erstellen
+    // Create a tensor for the checkpoint path
     tensorflow::Tensor checkpoint_tensor(tensorflow::DT_STRING, tensorflow::TensorShape({}));
     checkpoint_tensor.scalar<tensorflow::tstring>()() = checkpoint_prefix;
 
-    // Speicheroperation korrekt definieren
+    // Define the save operation
     auto tensor_names = tensorflow::ops::Const(root.WithOpName("tensor_names"),
                                                {"fc1_weights", "fc2_weights"},
                                                tensorflow::TensorShape({2}));
@@ -205,20 +211,51 @@ void ActorCriticNetwork::SaveModel() {
                                          tensor_names,
                                          {fc1_weights, fc2_weights});
 
+    // Create a new session for saving the model
+    tensorflow::SessionOptions options;
+    tensorflow::Session* raw_save_session;
+    tensorflow::Status status = tensorflow::NewSession(options, &raw_save_session);
+    if (!status.ok()) {
+        std::cerr << "Error creating new session for saving: " << status.ToString() << std::endl;
+        return;
+    }
+    std::unique_ptr<tensorflow::Session> save_session(raw_save_session);
 
-    checkpoint_tensor.scalar<tensorflow::tstring>()() = "/tmp/tensorflow_model/model.ckpt";
-    tensorflow::Status status;
-    status = session_->Run(
-        {{"save/Const", checkpoint_tensor}},
-        {},
-        {"save/control_dependency"},
-        nullptr
-    );
+    // Define the path for the .pb file
+    std::string pb_path = export_dir + "/model.pb";
+    // Create the graph definition
+    //tensorflow::GraphDef graph_def;
+    status = root.ToGraphDef(&graph_def_);
+    if (!status.ok()) {
+        std::cerr << "Error obtaining graph definition: " << status.ToString() << std::endl;
+        return;
+    }
 
+    status = tensorflow::WriteBinaryProto(tensorflow::Env::Default(), pb_path, graph_def_);
+    if (!status.ok()) {
+        std::cerr << "Error writing graph definition to .pb file: " << status.ToString() << std::endl;
+    } else {
+        std::cout << "Model saved successfully at " << pb_path << std::endl;
+    }
 
+    // Create the session with the updated graph
+    status = save_session->Create(graph_def_);
+    if (!status.ok()) {
+        std::cerr << "Error creating session with updated graph: " << status.ToString() << std::endl;
+        return;
+    }
+
+    // Execute the save operation
+    status = save_session->Run({}, {}, {save_op.operation.node()->name()}, nullptr);
     if (!status.ok()) {
         std::cerr << "Error saving model: " << status.ToString() << std::endl;
     } else {
         std::cout << "Model saved successfully at " << checkpoint_prefix << std::endl;
+    }
+
+    // Close the save session
+    status = save_session->Close();
+    if (!status.ok()) {
+        std::cerr << "Error closing save session: " << status.ToString() << std::endl;
     }
 }
