@@ -200,20 +200,6 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
           action[1] = 0.0f;  // No linear velocity
           action[2] = ((float)rand() / RAND_MAX) * config_.max_ang_velocity;
       }
-  } else {
-      tensorflow::Tensor state_tensor(tensorflow::DT_FLOAT, tensorflow::TensorShape({1, static_cast<long>(state.size())}));
-      std::copy(state.begin(), state.end(), state_tensor.flat<float>().data());
-      std::vector<tensorflow::Tensor> outputs = actor_critic_network_->Predict(state_tensor);
-      auto actor_output = outputs[0].flat<float>();
-      if (rand() % 2 == 0) {  // 50% chance to use linear velocities
-          action[0] = actor_output(0) * config_.max_lin_velocity;
-          action[1] = actor_output(1) * config_.max_lin_velocity;
-          action[2] = 0.0f;  // No angular velocity
-      } else {  // 50% chance to use angular velocity
-          action[0] = 0.0f;  // No linear velocity
-          action[1] = 0.0f;  // No linear velocity
-          action[2] = actor_output(2) * config_.max_ang_velocity;
-      }
   }
 
   // 4. Execute action
@@ -230,6 +216,7 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
   if (training_mode_ && replay_buffer_.size() > batch_size_) {
     RCLCPP_INFO_STREAM(node_->get_logger(), "Training Model");
     trainModel();
+    replay_buffer_.clear();
   }
 
   if (cancel_requested_)
@@ -243,42 +230,6 @@ void RLMeshController::trainModel()
 {
   RCLCPP_INFO(node_->get_logger(), "Starting training model");
   exploration_threshold_ *= 0.8;  // Decay exploration threshold
-  // Sample a batch of transitions from the replay buffer
-  std::vector<std::tuple<std::vector<float>, std::vector<float>, float, std::vector<float>>> batch;
-  std::sample(replay_buffer_.begin(), replay_buffer_.end(), std::back_inserter(batch), batch_size_, std::mt19937{std::random_device{}()});
-
-  // Prepare tensors for states, actions, rewards, and next states
-  tensorflow::Tensor states(tensorflow::DT_FLOAT, tensorflow::TensorShape({static_cast<long>(batch.size()), 12}));
-  tensorflow::Tensor actions(tensorflow::DT_FLOAT, tensorflow::TensorShape({static_cast<long>(batch.size()), 3}));
-  tensorflow::Tensor rewards(tensorflow::DT_FLOAT, tensorflow::TensorShape({static_cast<long>(batch.size()), 1}));
-  tensorflow::Tensor next_states(tensorflow::DT_FLOAT, tensorflow::TensorShape({static_cast<long>(batch.size()), 12}));
-
-  for (size_t i = 0; i < batch.size(); ++i) {
-    const auto& [state, action, reward, next_state] = batch[i];
-    std::copy(state.begin(), state.end(), &states.matrix<float>()(i, 0));
-    std::copy(action.begin(), action.end(), &actions.matrix<float>()(i, 0));
-    rewards.matrix<float>()(i, 0) = reward;
-    std::copy(next_state.begin(), next_state.end(), &next_states.matrix<float>()(i, 0));
-  }
-
-  // Log tensor shapes for debugging
-  RCLCPP_INFO(node_->get_logger(), "States tensor shape: [%ld, %ld]", states.shape().dim_size(0), states.shape().dim_size(1));
-  RCLCPP_INFO(node_->get_logger(), "Actions tensor shape: [%ld, %ld]", actions.shape().dim_size(0), actions.shape().dim_size(1));
-  RCLCPP_INFO(node_->get_logger(), "Rewards tensor shape: [%ld, %ld]", rewards.shape().dim_size(0), rewards.shape().dim_size(1));
-  RCLCPP_INFO(node_->get_logger(), "Next states tensor shape: [%ld, %ld]", next_states.shape().dim_size(0), next_states.shape().dim_size(1));
-  RCLCPP_INFO(node_->get_logger(), "Exploration rate: [%f]", exploration_threshold_);
-  // Train the actor-critic network
-  try {
-    actor_critic_network_->Train(states, actions, rewards, next_states);
-  } catch (const std::runtime_error& e) {
-    RCLCPP_ERROR(node_->get_logger(), "Failed to train model: %s", e.what());
-    throw;
-  }
-
-  // Wipe replay buffer
-  actor_critic_network_->SaveModel();
-  replay_buffer_.clear();
-  RCLCPP_INFO(node_->get_logger(), "Finished training model");
 }
 
 bool RLMeshController::isGoalReached(double dist_tolerance, double angle_tolerance)

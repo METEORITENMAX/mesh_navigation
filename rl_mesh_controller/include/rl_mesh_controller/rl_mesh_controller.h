@@ -7,13 +7,6 @@
 #include <mesh_map/mesh_map.h>
 #include <visualization_msgs/msg/marker_array.hpp>
 
-#include <tensorflow/core/public/session.h>
-#include <tensorflow/core/protobuf/meta_graph.pb.h>
-#include <tensorflow/core/framework/tensor.h>
-#include <tensorflow/core/framework/graph.pb.h>
-#include <tensorflow/core/platform/env.h>
-
-
 
 #include <iostream>
 #include <vector>
