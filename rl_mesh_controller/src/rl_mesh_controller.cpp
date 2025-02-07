@@ -513,10 +513,6 @@ bool RLMeshController::initialize(const std::string& plugin_name,
   reconfiguration_callback_handle_ = node_->add_on_set_parameters_callback(std::bind(
       &RLMeshController::reconfigureCallback, this, std::placeholders::_1));
 
-  RCLCPP_INFO(node_->get_logger(), "Initialized Actor Critic Network");
-  // Initialize the actor-critic network
-  actor_critic_network_ = std::make_unique<ActorCriticNetwork>();
-  actor_critic_network_->initializeGraph();
   exploration_threshold_ = 40.0;  // 40% exploration
 
 

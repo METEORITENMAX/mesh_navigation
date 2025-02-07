@@ -11,7 +11,6 @@
 
 #include <iostream>
 #include <vector>
-#include "actor_critic_network.h"
 
 namespace rl_mesh_controller
 {
@@ -172,7 +171,7 @@ private:
 
   // torch::nn::Sequential actor_;
   // torch::nn::Sequential critic_;
-  std::unique_ptr<ActorCriticNetwork> actor_critic_network_;
+
 
   std::vector<float> previous_state_;
   std::vector<float> previous_action_;
