@@ -10,11 +10,7 @@ find_package(mesh_map REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(LVR2 REQUIRED)
-
-#find_package(class_loader REQUIRED)
-# Set MKL include and library directories
-# set(MKL_INCLUDE_DIR "/usr/include/mkl")
-# set(MKL_LIBRARY "/usr/lib/x86_64-linux-gnu/libmkl_rt.so")
+find_package(rl_mesh_controller_msgs REQUIRED)
 
 pluginlib_export_plugin_description_file(mbf_mesh_core rl_mesh_controller.xml)
 add_library(${PROJECT_NAME} src/rl_mesh_controller.cpp)
@@ -26,7 +22,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
   ${LVR2_INCLUDE_DIRS}
 )
 target_compile_definitions(${PROJECT_NAME} PRIVATE "MESH_CONTROLLER_BUILDING_LIBRARY")
-ament_target_dependencies(${PROJECT_NAME} example_interfaces mbf_mesh_core mbf_msgs mbf_utility mesh_map rclcpp tf2_geometry_msgs)
+ament_target_dependencies(${PROJECT_NAME} example_interfaces mbf_mesh_core mbf_msgs mbf_utility mesh_map rclcpp tf2_geometry_msgs rl_mesh_controller_msgs)
 target_link_libraries(${PROJECT_NAME}
     ${LVR2_LIBRARIES}
 )
@@ -42,5 +38,5 @@ install(TARGETS ${PROJECT_NAME}
 ament_export_include_directories(include)
 ament_export_libraries(${PROJECT_NAME})
 ament_export_targets(export_${PROJECT_NAME})
-ament_export_dependencies(example_interfaces mbf_mesh_core mbf_msgs mbf_utility mesh_map rclcpp tf2_geometry_msgs )
+ament_export_dependencies(example_interfaces mbf_mesh_core mbf_msgs mbf_utility mesh_map rclcpp tf2_geometry_msgs rl_mesh_controller_msgs)
 ament_package()

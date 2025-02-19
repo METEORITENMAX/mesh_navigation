@@ -165,11 +165,14 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
   std::vector<float> state = get_state();
 
   // Ensure the state vector has exactly 12 elements
-  if (state.size() != 12) {
-    RCLCPP_ERROR(node_->get_logger(), "State vector size is not 12, it is %zu", state.size());
+  if (state.size() != 10) {
+    RCLCPP_ERROR(node_->get_logger(), "State vector size is not 9, it is %zu", state.size());
     return mbf_msgs::action::ExePath::Result::FAILURE;
   }
-
+  // Publish the state
+  auto state_msg = std_msgs::msg::Float32MultiArray();
+  state_msg.data = state;
+  state_publisher_->publish(state_msg);
   // 2. Calculate reward and observe next state based on the previous state and action
   if (!previous_state_.empty() && !previous_action_.empty()) {
       float initial_distance = last_goal_distance_;
@@ -177,53 +180,73 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
 
       // Calculate new distance
       float new_distance = (goal_pos_ - robot_pos_).length();
-      reward = initial_distance - new_distance;  // Positive reward if distance decreases
 
-      std::vector<float> next_state = state;  // Update based on action
+      float de_penalty = initial_distance - new_distance;
+      // Heading Error (HE)
+      float he = previous_state_[2];
 
-      // Store transition in replay buffer
-      if (replay_buffer_.size() >= replay_buffer_size_) {
-          replay_buffer_.erase(replay_buffer_.begin());
-      }
-      replay_buffer_.emplace_back(previous_state_, previous_action_, reward, next_state);
+      // Heading Error (HE) Penalty
+      //float he_penalty = he / (1 + new_distance);  // Scale down HE penalty when distance error increases
+      float Kh = .5f;  // Tune this value
+      float Sh = .5f;  // Shape factor for scaling
+      float distance_weight = std::min(1.0f, 1.0f / (new_distance + 0.1f));  // Avoid division by zero
+      // float he_penalty = -Kh * pow(std::abs(he), Sh) * distance_weight;
+      float he_penalty = -Kh * pow(std::abs(he) / (1 + new_distance), Sh);
+      // Total reward
+      reward = de_penalty; //+ he_penalty;
+
+      float min_reward = -0.1f;
+      float max_reward = 0.1f;
+
+      // Ensure reward stays within bounds before normalizing
+      //reward = std::max(min_reward, std::min(reward, max_reward));
+
+      // Apply normalization
+      //reward = ((reward - min_reward) / (max_reward - min_reward)) * 200.0f - 100.0f;
+      // if (new_distance < initial_distance) {
+      //   reward += 0.5f * (initial_distance - new_distance);  // Boost positive rewards
+    std::vector<float> next_state = state;  // Update based on action
+    auto msg = rl_mesh_controller_msgs::msg::StateActionRewardNextState();
+    msg.state = previous_state_;
+    msg.action = previous_action_;
+    msg.reward = reward;
+    msg.next_state = state;
+    state_buffer_publisher_->publish(msg);
   }
 
   // 3. Select action (inference or exploration)
   std::vector<float> action(3);
-  if (training_mode_ && rand() % 100 < exploration_threshold_) {  // 40% exploration
-      if (rand() % 2 == 0) {  // 50% chance to use linear velocities
-          action[0] = ((float)rand() / RAND_MAX) * config_.max_lin_velocity;
-          action[1] = ((float)rand() / RAND_MAX) * config_.max_lin_velocity;
-          action[2] = 0.0f;  // No angular velocity
-      } else {  // 50% chance to use angular velocity
-          action[0] = 0.0f;  // No linear velocity
-          action[1] = 0.0f;  // No linear velocity
-          action[2] = ((float)rand() / RAND_MAX) * config_.max_ang_velocity;
-      }
-  }
 
   // 4. Execute action
-  cmd_vel.twist.linear.x = std::min(config_.max_lin_velocity, action[0] * config_.lin_vel_factor);
-  cmd_vel.twist.linear.y = std::min(config_.max_lin_velocity, action[1] * config_.lin_vel_factor);
-  cmd_vel.twist.angular.z = std::min(config_.max_ang_velocity, action[2] * config_.ang_vel_factor);
-  cmd_vel.header.stamp = node_->now();
+  if (received_twist_) {
+      cmd_vel.twist.linear.x = std::min(config_.max_lin_velocity, received_twist_->linear.x * config_.lin_vel_factor);
+      cmd_vel.twist.linear.y = std::min(config_.max_lin_velocity, received_twist_->linear.y * config_.lin_vel_factor);
+      cmd_vel.twist.angular.z = std::min(config_.max_ang_velocity, received_twist_->angular.z * config_.ang_vel_factor);
+      cmd_vel.header.stamp = node_->now();
+      action[0] = cmd_vel.twist.linear.x;
+      action[1] = cmd_vel.twist.linear.y;
+      action[2] = cmd_vel.twist.angular.z;
+  }
 
   // 5. Update previous state and action
   previous_state_ = state;
   previous_action_ = action;
   last_goal_distance_ = (goal_pos_ - robot_pos_).length();
-  // 6. Train model if in training mode
-  if (training_mode_ && replay_buffer_.size() > batch_size_) {
-    RCLCPP_INFO_STREAM(node_->get_logger(), "Training Model");
-    trainModel();
-    replay_buffer_.clear();
-  }
 
   if (cancel_requested_)
   {
     return mbf_msgs::action::ExePath::Result::CANCELED;
   }
   return mbf_msgs::action::ExePath::Result::SUCCESS;
+}
+
+void RLMeshController::tensorActionCallback(const geometry_msgs::msg::Twist::SharedPtr msg) {
+    received_twist_ = msg;
+}
+void RLMeshController::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+   //RCLCPP_INFO(node_->get_logger(), "Received odometry: angular velocity z: %f", msg->twist.twist.angular.z);
+    angular_velocity_ = msg->twist.twist.angular.z;
+
 }
 
 void RLMeshController::trainModel()
@@ -323,14 +346,49 @@ std::vector<geometry_msgs::msg::PoseStamped> RLMeshController::calculateLookahea
 
 std::vector<float> RLMeshController::get_state()
 {
-  std::array<float, 12> state;
+  std::array<float, 10> state;
   state.fill(1.0f);  // Initialize the array with 1.0 floats
-  state[0] = robot_pos_.x;
-  state[1] = robot_pos_.y;
-  state[2] = robot_pos_.z;
-  state[3] = robot_dir_.x;
-  state[4] = robot_dir_.y;
-  state[5] = robot_dir_.z;
+
+  // Calculate Distance Error (DE)
+  float de = std::sqrt(std::pow(goal_pos_.x - robot_pos_.x, 2) +
+                        std::pow(goal_pos_.y - robot_pos_.y, 2) +
+                        std::pow(goal_pos_.z - robot_pos_.z, 2));
+
+  // Calculate Derivative of Distance Error (DDE)
+  rclcpp::Time current_time = node_->now();
+  float time_step = (current_time - previous_time_).seconds();
+  float dde;
+  if (time_step <= 0.0f) {
+    time_step = 1.0;
+  }
+  dde = (de - previous_de_) / time_step;
+  // Update previous DE and previous time
+  previous_de_ = de;
+  previous_time_ = current_time;
+  float dot_product = goal_dir_.x * robot_dir_.x +
+                      goal_dir_.y * robot_dir_.y +
+                      goal_dir_.z * robot_dir_.z;
+
+  float goal_dir_mag = std::sqrt(goal_dir_.x * goal_dir_.x +
+                                goal_dir_.y * goal_dir_.y +
+                                goal_dir_.z * goal_dir_.z);
+
+  float robot_dir_mag = std::sqrt(robot_dir_.x * robot_dir_.x +
+                                  robot_dir_.y * robot_dir_.y +
+                                  robot_dir_.z * robot_dir_.z);
+
+  float cos_theta = dot_product / (goal_dir_mag * robot_dir_mag);
+  float he_magnitude = std::acos(std::clamp(cos_theta, -1.0f, 1.0f)); // Angle in radians
+  // Calculate Heading Error (HE)
+  geometry_msgs::msg::Vector3 he;
+  he.x = goal_dir_.x - robot_dir_.x;
+  he.y = goal_dir_.y - robot_dir_.y;
+  he.z = goal_dir_.z - robot_dir_.z;
+
+  // Set DE, DDE, and HE as the first elements of the state
+  state[0] = de;
+  state[1] = dde;
+  state[2] = he_magnitude;//std::sqrt(std::pow(he.x, 2) + std::pow(he.y, 2) + std::pow(he.z, 2)); //he_magnitude// Magnitude of HE
 
   std::vector<float> distances = {1.0, 2.0, 3.0};
   auto lookahead_points = calculateLookahead(current_plan_, distances);
@@ -342,10 +400,24 @@ std::vector<float> RLMeshController::get_state()
 
   for (size_t i = 0; i < lookahead_points.size(); ++i)
   {
-    state[6 + i * 3] = lookahead_points[i].pose.position.x;
-    state[7 + i * 3] = lookahead_points[i].pose.position.y;
-    state[8 + i * 3] = lookahead_points[i].pose.position.z;
+    // Calculate Distance to Look-Ahead Point (Dl)
+    float dx = lookahead_points[i].pose.position.x - robot_pos_.x;
+    float dy = lookahead_points[i].pose.position.y - robot_pos_.y;
+    float dz = lookahead_points[i].pose.position.z - robot_pos_.z;
+    float dl = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+    // Calculate Angle to Look-Ahead Point (θl)
+    float dot_product = dx * robot_dir_.x + dy * robot_dir_.y + dz * robot_dir_.z;
+    float robot_dir_magnitude = std::sqrt(robot_dir_.x * robot_dir_.x + robot_dir_.y * robot_dir_.y + robot_dir_.z * robot_dir_.z);
+    float lookahead_dir_magnitude = std::sqrt(dx * dx + dy * dy + dz * dz);
+    float cos_theta = dot_product / (robot_dir_magnitude * lookahead_dir_magnitude);
+    float theta = std::acos(cos_theta);
+
+    state[3 + i * 2] = dl;
+    state[4 + i * 2] = theta;
   }
+
+  state[9] = angular_velocity_;  // Angular velocity
   //print state size
   //RCLCPP_INFO(node_->get_logger(), "state size: %d", state.size());
   // RCLCPP_INFO(node_->get_logger(), "State: robot_pos: (%f, %f, %f), robot_dir: (%f, %f, %f), lookahead_points: (%f, %f, %f), (%f, %f, %f), (%f, %f, %f)",
@@ -513,7 +585,16 @@ bool RLMeshController::initialize(const std::string& plugin_name,
   reconfiguration_callback_handle_ = node_->add_on_set_parameters_callback(std::bind(
       &RLMeshController::reconfigureCallback, this, std::placeholders::_1));
 
+  state_publisher_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>("/model_state", 10);
+  tensor_action_subscription_ = node_->create_subscription<geometry_msgs::msg::Twist>(
+    "/tensor_action", 10, std::bind(&RLMeshController::tensorActionCallback, this, std::placeholders::_1));
+  odom_subscription_ = node_->create_subscription<nav_msgs::msg::Odometry>(
+    "/Spot/odometry", 10, std::bind(&RLMeshController::odomCallback, this, std::placeholders::_1));
+  state_buffer_publisher_ = node_->create_publisher<rl_mesh_controller_msgs::msg::StateActionRewardNextState>("/state_buffer", 10);
   exploration_threshold_ = 40.0;  // 40% exploration
+  previous_de_ = 0.0;
+  previous_time_ = node_->now();
+  angular_velocity_= 0.0f;
 
 
   return true;

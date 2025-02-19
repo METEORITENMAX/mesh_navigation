@@ -8,7 +8,10 @@
 #include <mesh_map/mesh_map.h>
 #include <visualization_msgs/msg/marker_array.hpp>
 
-
+#include "std_msgs/msg/float32_multi_array.hpp"
+#include "geometry_msgs/msg/twist.hpp"
+#include "nav_msgs/msg/odometry.hpp"
+#include "rl_mesh_controller_msgs/msg/state_action_reward_next_state.hpp"
 #include <iostream>
 #include <vector>
 
@@ -172,11 +175,21 @@ private:
   // torch::nn::Sequential actor_;
   // torch::nn::Sequential critic_;
 
+  rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr state_publisher_;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr tensor_action_subscription_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
+
+  rclcpp::Publisher<rl_mesh_controller_msgs::msg::StateActionRewardNextState>::SharedPtr state_buffer_publisher_;
+
+  geometry_msgs::msg::Twist::SharedPtr received_twist_;
 
   std::vector<float> previous_state_;
   std::vector<float> previous_action_;
   float last_goal_distance_;
   float exploration_threshold_;
+  float previous_de_;
+  float angular_velocity_;
+  rclcpp::Time previous_time_;
 
   std::vector<std::tuple<std::vector<float>, std::vector<float>, float, std::vector<float>>> replay_buffer_;
   size_t replay_buffer_size_ = 512;
@@ -184,6 +197,9 @@ private:
   bool training_mode_ = true;
 
   void trainModel();
+  void tensorActionCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
+  void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
+
 
   struct {
     double max_lin_velocity = 1.0;
