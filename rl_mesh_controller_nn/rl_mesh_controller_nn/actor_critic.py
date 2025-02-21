@@ -11,6 +11,12 @@ import time
 from .replay_buffer import ReplayBuffer
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
+
+import threading
+import matplotlib.pyplot as plt
+
+
+
 """ action_dim: dimensions for which the noise will be generated
     mu: mean value towards which the noise will tend to revert over time.
     theta: how quickly the noise reverts to the mean (mu)
@@ -41,8 +47,7 @@ class ActorNetwork(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
         super(ActorNetwork, self).__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)  # First fully connected layer
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3 = nn.Linear(hidden_size, output_size)  # Third fully connected layer (output layer)
+        self.fc2 = nn.Linear(hidden_size, output_size)
 
         self.log_std = nn.Parameter(torch.zeros(output_size))  # Learnable log standard deviation
         # Initialize weights
@@ -57,13 +62,9 @@ class ActorNetwork(nn.Module):
         nn.init.xavier_uniform_(self.fc2.weight)
         nn.init.zeros_(self.fc2.bias)
 
-        nn.init.xavier_uniform_(self.fc3.weight)
-        nn.init.zeros_(self.fc3.bias)
-
     def forward(self, x):
         x = torch.relu(self.fc1(x))
-        x = torch.tanh(self.fc2(x))
-        action_mean = torch.tanh(self.fc3(x))   # Mean of action distribution
+        action_mean = torch.tanh(self.fc2(x))   # Mean of action distribution
         action_log_std = self.log_std.expand_as(action_mean)  # Log standard deviation
         return action_mean, action_log_std
 
@@ -109,8 +110,10 @@ class ActorCriticNode(Node):
         input_size = 10
         hidden_size = 64
         output_size = 3
+        self.sigma = 0.1
+        self.theta = 0.15
         self.actor = ActorNetwork(input_size, hidden_size, output_size)
-        self.noise_process = OrnsteinUhlenbeckNoise(action_dim=3, mu=0, theta=0.15, sigma=0.4)
+        self.noise_process = OrnsteinUhlenbeckNoise(action_dim=3, mu=0, theta=self.theta, sigma=self.sigma)
         self.target_actor = ActorNetwork(input_size, hidden_size, output_size)
         self.critic = CriticNetwork(input_size+output_size, hidden_size)
         self.target_critic = CriticNetwork(input_size+output_size, hidden_size)
@@ -122,11 +125,11 @@ class ActorCriticNode(Node):
         self.get_logger().info('ActorCriticNode initialized.')
 
         # Define the loss function and optimizers
+        self.lr = 1e-5
         self.critic_criterion = nn.MSELoss()
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=1e-3)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=1e-3)
-        #torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
-        #torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.lr)
+
 
         # Discount factor for future rewards
         self.gamma = 0.9
@@ -137,7 +140,7 @@ class ActorCriticNode(Node):
         #self.replay_buffer_neg = ReplayBuffer(capacity=4096)
         self.long_term_buffer_neg = ReplayBuffer(capacity=10000)
         self.long_term_buffer_pos = ReplayBuffer(capacity=10000)
-        self.batch_size = 64
+        self.batch_size = 32
         self.longterm_batch_size = 500
         #Create timers
         self.create_timer(2., self.train)
@@ -145,30 +148,103 @@ class ActorCriticNode(Node):
         # Exploration phase settings
         self.max_exploration_time = 300  # Stop after 5 minutes (300 sec)
         self.exploration_start_time = time.time()
-        self.saved_motions_active = True
-        self.exploration_active = True
+        # Initialize lists to store loss values
+        self.actor_losses = []
+        self.critic_losses = []
+        self.time_steps = []
+        self.output_tensor = []
+        self.output_tensor_noise = []
+        self.de_list = []
+        self.he_list = []
+        self.reward_list = []
+        self.tau = 0.005
+        self.global_params = {
+            'Learning Rate': self.lr ,
+            'Batch Size': self.batch_size,
+            'Gamma': self.gamma,
+            'Tau': self.tau,
+            'Sigma': self.sigma,
+            'Theta': self.theta
+        }
+        # Start the plotting thread
+        self.plotting_thread = threading.Thread(target=self.plot_losses)
+        self.plotting_thread.start()
+
+    def plot_losses(self):
+        plt.ion()
+        fig, axs = plt.subplots(5, 1, figsize=(8, 20))  # 4 subplots (1 for loss, 3 for action components)
+        plt.show(block=False)  # Ensure the plot is displayed
+        # Add global parameters as text box at the top
+        param_text = '\n'.join([f'{key}: {value}' for key, value in self.global_params.items()])
+        fig.text(0.5, 0.9, param_text, fontsize=12, bbox=dict(facecolor='white', alpha=0.5), ha='center')
+        while True:
+            try:
+                if len(self.critic_losses) > 0:  # Only plot if data is available
+                    # Plot Losses (Actor & Critic)
+                    axs[0].clear()
+                    axs[0].plot(range(len(self.critic_losses)), self.critic_losses, label='Critic Loss')
+                    axs[0].plot(range(len(self.actor_losses)), self.actor_losses, label='Actor Loss', color='red')
+                    axs[0].set_xlabel('Training Steps')
+                    axs[0].set_ylabel('Loss')
+                    axs[0].legend()
+
+                    # Ensure we have output tensor values to plot
+                    if len(self.output_tensor) > 0:
+                        output_array = np.array(self.output_tensor)  # Convert to NumPy array
+                        noise_array = np.array(self.output_tensor_noise)
+
+                        for i in range(3):  # x, y, z components
+                            axs[i + 1].clear()
+                            axs[i + 1].plot(output_array[:, i], label=f'Action {i} (Output)', color='blue')
+                            axs[i + 1].plot(noise_array[:, i], label=f'Action {i} (Output + Noise)', linestyle='dashed', color='orange')
+
+                            axs[i + 1].set_xlabel('Steps')
+                            axs[i + 1].set_ylabel(f'Velocity {["X", "Y", "Z"][i]}')
+                            axs[i + 1].legend()
+
+                    # Plot Reward, DE, and HE Lists in one graph
+                    if len(self.reward_list) > 0:
+                        min_length = min(len(self.reward_list), len(self.de_list), len(self.he_list))
+                        axs[4].clear()
+                        axs[4].plot(range(min_length), self.reward_list[:min_length], label='Reward', color='green')
+                        axs[4].plot(range(min_length), self.de_list[:min_length], label='DE', color='purple')
+                        axs[4].plot(range(min_length), self.he_list[:min_length], label='HE', color='brown')
+                        axs[4].set_xlabel('Steps')
+                        axs[4].set_ylabel('Values')
+                        axs[4].legend()
+
+                    fig.canvas.draw()
+                    fig.canvas.flush_events()
+
+                time.sleep(0.2)  # Avoid overloading the CPU
+            except Exception as e:
+                self.get_logger().error(f"Error in plotting: {e}")
+                break  # Exit loop on error
+
     def reset_uhlennoise(self):
         self.noise_process.reset()
     def state_callback(self, msg):
         #if not self.saved_motions_active:
         # Convert the received data to a tensor
         input_tensor = torch.tensor(msg.data, dtype=torch.float32).view(1, -1)
-        #self.get_logger().info(f'Received input tensor: {input_tensor}')
 
         normalized_input = self.normalize_input(input_tensor)
-        #self.get_logger().info(f'Normalized input tensor: {normalized_input}')
 
-        # Forward pass through the actor network
         output_tensor = self.actor(normalized_input)[0]
         noise=self.noise_process()
+
+        self.output_tensor.append(output_tensor[0].detach().numpy())
+
         output_tensor = output_tensor[0]+ noise
+
+        self.output_tensor_noise.append(output_tensor.detach().numpy())
 
         twist_msg = Twist()
         twist_msg.linear.x = output_tensor[0].item()
         twist_msg.linear.y = output_tensor[1].item()
         twist_msg.angular.z = output_tensor[2].item()
         self.tensor_action_publisher.publish(twist_msg)
-        self.get_logger().info(f'noise: {noise}')
+        #self.get_logger().info(f'noise: {noise}')
     """
     0: de
     1: dee
@@ -197,22 +273,17 @@ class ActorCriticNode(Node):
         state = torch.tensor(msg.state, dtype=torch.float32).view(1, -1)
         action = torch.tensor(msg.action, dtype=torch.float32).view(1, -1)
         reward = torch.tensor([msg.reward], dtype=torch.float32)
-        min_reward_threshold = -10  # Set your threshold
         next_state = torch.tensor(msg.next_state, dtype=torch.float32).view(1, -1)
 
-        # if 0.0 > msg.reward > min_reward_threshold or abs(msg.reward) > 100.0:
-        #     return
-        # Normalize the state and next_state tensors
         normalized_state = self.normalize_input(state)
         normalized_next_state = self.normalize_input(next_state)
 
-        #reward = (reward - min_reward) / (max_reward - min_reward)
+        self.reward_list.append(reward.item())
+        self.de_list.append(normalized_state[0][0].item())
+        self.he_list.append(normalized_state[0][2].item())
+        #self.get_logger().info(f'normalized_state: {normalized_state}')
 
-
-        reward *= 100
-
-        self.get_logger().info(f'reward: {normalized_state}')
-        if abs(reward) > .6:
+        if abs(reward) > 1.0:
             if reward > .0:
                 self.long_term_buffer_pos.push(normalized_state, action, reward, normalized_next_state)
             else:
@@ -253,58 +324,51 @@ class ActorCriticNode(Node):
             self.get_logger().info(f'Using both buffers: {self.batch_size} from live + {self.longterm_batch_size} from long-term')
 
         reward_batch = reward_batch.view(-1, 1)
+        #self.get_logger().info(f'Using both buffers: {state_batch} from live + {reward_batch} from long-term')
 
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.)
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.)
-        next_action_batch = self.target_actor(next_state_batch)
-        next_state_action_batch = torch.cat([next_state_batch, next_action_batch[0]], dim=1)
-        #target_value_batch = reward_batch + self.gamma * self.target_critic(next_state_action_batch)
+        # Compute target Q-values
+        next_action_batch = self.target_actor(next_state_batch)[0]  # Take action from target actor
+        next_state_action_batch = torch.cat([next_state_batch, next_action_batch], dim=1)
         target_value_batch = reward_batch + self.gamma * self.target_critic(next_state_action_batch).detach()
+        #target_value_batch = torch.clamp(target_value_batch, -1.0, 1.0)
 
+        #self.get_logger().info(f'Q-Values: {target_value_batch} ')
         # Compute critic loss
         state_action_batch = torch.cat([state_batch, action_batch], dim=1)
         predicted_value_batch = self.critic(state_action_batch)
         critic_loss = self.critic_criterion(predicted_value_batch, target_value_batch)
-        actor_loss = -self.critic(torch.cat([state_batch, self.actor(state_batch)[0]], dim=1)).mean()
 
-        action_mean, action_log_std = self.actor(state_batch)
-        action_log_std = torch.clamp(action_log_std, min=-.5, max=.5)
-        action_std = action_log_std.exp()
-        action_std = torch.clamp(action_std, min=1e-6)
-        #self.get_logger().info(f'Action std: {action_std}')
-
-        probs = torch.distributions.Normal(action_mean, action_std).sample()
-        probs = torch.clamp(probs, min=1e-6, max=1 - 1e-6)
-        expected_return = self.critic(torch.cat([state_batch, self.actor(state_batch)[0]], dim=1)).mean()
-        alpha = 1e-3  # Adjust based on your entropy scaling needs
-        epsilon = 1e-8
-        entropy = -torch.sum(probs * torch.log(probs + epsilon), dim=-1).mean()
-        #self.get_logger().info(f"Action probs: {probs}")
-        #self.get_logger().info(f"Action entropy: {entropy}")
-        #actor_loss = -expected_return + alpha * entropy
-        self.get_logger().info(f'-------------------------Computed critic loss: {critic_loss.item()}')
-        self.get_logger().info(f'-------------------------Computed actor loss: {actor_loss.item()}')
-        critic_loss.backward()
-        actor_loss.backward()
-        #total_loss = critic_loss + actor_loss
-
-        # Zero out gradients before backpropagation
-        self.actor_optimizer.zero_grad()
+        # Zero out critic gradients before backpropagation
         self.critic_optimizer.zero_grad()
-
-        # Backpropagate only once
-        #total_loss.backward()
-
-        # Update both networks
-        self.actor_optimizer.step()
+        critic_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)  # Clip gradients
         self.critic_optimizer.step()
-        # self.get_logger().info(f'Target value batch: {target_value_batch}')
-        # self.get_logger().info(f'Predicted critic values: {predicted_value_batch}')
-        # Update target networks
+
+        # Compute actor loss
+        predicted_actions = self.actor(state_batch)[0]  # Mean action output
+        actor_loss = -self.critic(torch.cat([state_batch, predicted_actions], dim=1)).mean()
+
+        # Zero out actor gradients before backpropagation
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)  # Clip gradients
+        self.actor_optimizer.step()
+
         self.update_target_networks()
 
+        self.get_logger().info(f'-------------------------Computed critic loss: {critic_loss.item()}')
+        self.get_logger().info(f'-------------------------Computed actor loss: {actor_loss.item()}')
+
+        # Update target networks
+
+        self.actor_losses.append(actor_loss.item())
+        self.critic_losses.append(critic_loss.item())
+        current_time = self.get_clock().now().seconds_nanoseconds()[0]  # Get current time in seconds
+        self.time_steps.append(current_time)
+
+
     def update_target_networks(self):
-        tau = 0.005  # Small update factor
+        tau = self.tau   # Small update factor
         for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
