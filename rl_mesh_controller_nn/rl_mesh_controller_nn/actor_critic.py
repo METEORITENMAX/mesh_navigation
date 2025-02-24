@@ -43,6 +43,24 @@ class OrnsteinUhlenbeckNoise:
         self.state = self.state + noise
         return self.state
 
+class ValueNetwork(nn.Module):
+    def __init__(self, input_size, hidden_size):
+        super(ValueNetwork, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, 1)
+        self.init_weights()
+
+    def init_weights(self):
+        nn.init.xavier_uniform_(self.fc1.weight)
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.xavier_uniform_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
+
+    def forward(self, x):
+        x = nn.LeakyReLU(0.1)(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
 class ActorNetwork(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
         super(ActorNetwork, self).__init__()
@@ -112,21 +130,29 @@ class ActorCriticNode(Node):
         output_size = 3
         self.sigma = 0.1
         self.theta = 0.15
-        self.actor = ActorNetwork(input_size, hidden_size, output_size)
         self.noise_process = OrnsteinUhlenbeckNoise(action_dim=3, mu=0, theta=self.theta, sigma=self.sigma)
+
+        self.actor = ActorNetwork(input_size, hidden_size, output_size)
         self.target_actor = ActorNetwork(input_size, hidden_size, output_size)
         self.critic = CriticNetwork(input_size+output_size, hidden_size)
         self.target_critic = CriticNetwork(input_size+output_size, hidden_size)
+        self.value = ValueNetwork(input_size, hidden_size)
+        self.target_value = ValueNetwork(input_size, hidden_size)
 
         self.target_actor.load_state_dict(self.actor.state_dict())
         self.target_critic.load_state_dict(self.critic.state_dict())
+        self.target_value.load_state_dict(self.value.state_dict())
+
         self.target_actor.eval()
         self.target_critic.eval()
+        self.target_value.eval()
         self.get_logger().info('ActorCriticNode initialized.')
 
         # Define the loss function and optimizers
-        self.lr = 1e-5
+        self.lr = 1e-7
         self.critic_criterion = nn.MSELoss()
+        self.value_criterion = nn.MSELoss()
+        self.value_optimizer = optim.Adam(self.value.parameters(), lr=self.lr)
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.lr)
 
@@ -332,6 +358,18 @@ class ActorCriticNode(Node):
         target_value_batch = reward_batch + self.gamma * self.target_critic(next_state_action_batch).detach()
         #target_value_batch = torch.clamp(target_value_batch, -1.0, 1.0)
 
+        # Compute value loss
+        predicted_value_batch = self.value(state_batch)
+        value_loss = self.value_criterion(predicted_value_batch, target_value_batch)
+
+        # Zero out value gradients before backpropagation
+        self.value_optimizer.zero_grad()
+        value_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.value.parameters(), max_norm=1.0)  # Clip gradients
+        self.value_optimizer.step()
+
+        # Compute advantage
+        advantage = target_value_batch - predicted_value_batch.detach()
         #self.get_logger().info(f'Q-Values: {target_value_batch} ')
         # Compute critic loss
         state_action_batch = torch.cat([state_batch, action_batch], dim=1)
@@ -346,7 +384,8 @@ class ActorCriticNode(Node):
 
         # Compute actor loss
         predicted_actions = self.actor(state_batch)[0]  # Mean action output
-        actor_loss = -self.critic(torch.cat([state_batch, predicted_actions], dim=1)).mean()
+        #actor_loss = -self.critic(torch.cat([state_batch, predicted_actions], dim=1)).mean()
+        actor_loss = -(advantage * self.critic(torch.cat([state_batch, predicted_actions], dim=1))).mean()
 
         # Zero out actor gradients before backpropagation
         self.actor_optimizer.zero_grad()
@@ -375,6 +414,8 @@ class ActorCriticNode(Node):
         for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
+        for target_param, param in zip(self.target_value.parameters(), self.value.parameters()):
+            target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
     def save_model(self, file_path):
         torch.save({
             'actor_state_dict': self.actor.state_dict(),

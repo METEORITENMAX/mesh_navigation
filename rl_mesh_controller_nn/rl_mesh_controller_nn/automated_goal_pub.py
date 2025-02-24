@@ -8,15 +8,15 @@ class GoalPublisher(Node):
     def __init__(self):
         super().__init__('goal_publisher')
         self.publisher_ = self.create_publisher(PoseStamped, '/rviz/goal_pose', 10)
-        self.timer = self.create_timer(35.0, self.publish_goal)  # Publish every second
+        self.timer = self.create_timer(15.0, self.publish_goal)  # Publish every second
 
         self.poses = [
-            (3.0, 0.0, 0.0),  # 3 meters front
-            (-3.0, 0.0, 0.0),  # 3 meters back
-            (0.0, 3.0, 0.0),  # 3 meters left
-            (0.0, -3.0, 0.0),  # 3 meters right
-            (3.0, 3.0, 0.0),  # 3 meters front-left
-            (3.0, -3.0, 0.0),  # 3 meters front-right
+            #(3.0, 0.0, 0.0),  # 3 meters front
+            # (-3.0, 0.0, 0.0),  # 3 meters back
+            # (0.0, 3.0, 0.0),  # 3 meters left
+             (0.0, -3.0, 0.0),  # 3 meters right
+            # (3.0, 3.0, 0.0),  # 3 meters front-left
+            # (3.0, -3.0, 0.0),  # 3 meters front-right
             # (-3.0, 3.0, 0.0),  # 3 meters back-left
             # (-3.0, -3.0, 0.0),  # 3 meters back-right
         ]
