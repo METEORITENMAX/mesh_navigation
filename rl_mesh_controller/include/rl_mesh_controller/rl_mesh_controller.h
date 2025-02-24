@@ -189,7 +189,10 @@ private:
   float exploration_threshold_;
   float previous_de_;
   float angular_velocity_;
+  float previous_reward_;
+  bool goal_reached_;
   rclcpp::Time previous_time_;
+  rl_mesh_controller_msgs::msg::StateActionRewardNextState state_msg_;
 
   std::vector<std::tuple<std::vector<float>, std::vector<float>, float, std::vector<float>>> replay_buffer_;
   size_t replay_buffer_size_ = 512;

@@ -43,6 +43,7 @@
 #include <pluginlib/class_list_macros.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <mbf_utility/exe_path_exception.h>
+#include <cmath>
 
 PLUGINLIB_EXPORT_CLASS(rl_mesh_controller::RLMeshController, mbf_mesh_core::MeshController);
 
@@ -172,16 +173,22 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
   // Publish the state
   auto state_msg = std_msgs::msg::Float32MultiArray();
   state_msg.data = state;
+  float reward = 0.0f;
   state_publisher_->publish(state_msg);
+   // Or a neutral value
   // 2. Calculate reward and observe next state based on the previous state and action
-  if (!previous_state_.empty() && !previous_action_.empty()) {
+  if (!previous_state_.empty() && !previous_action_.empty() && !std::isnan(previous_reward_)) {
       float initial_distance = last_goal_distance_;
-      float reward = 0.0f;
+
 
       // Calculate new distance
       float new_distance = (goal_pos_ - robot_pos_).length();
 
-      float de_penalty = initial_distance - new_distance;
+      //float de_penalty = (initial_distance - new_distance)*state[0];
+      float distance_diff = initial_distance - new_distance;
+      float scale_factor = 1000.0f;  // Adjust this value to amplify the effect
+      float scaled_distance_diff = distance_diff * scale_factor;
+      float de_penalty = std::exp(scaled_distance_diff) * distance_diff * (distance_diff > 0 ? 1 : -1) * state[0];
       // Heading Error (HE)
       float he = previous_state_[2];
 
@@ -193,7 +200,7 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
       // float he_penalty = -Kh * pow(std::abs(he), Sh) * distance_weight;
       float he_penalty = -Kh * pow(std::abs(he) / (1 + new_distance), Sh);
       // Total reward
-      reward = de_penalty; //+ he_penalty;
+      reward = de_penalty + he_penalty;
 
       float min_reward = -0.1f;
       float max_reward = 0.1f;
@@ -211,9 +218,18 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
     msg.action = previous_action_;
     msg.reward = reward;
     msg.next_state = state;
-    state_buffer_publisher_->publish(msg);
+    state_msg_ = msg;
+    // Define exclusion radius
+    float exclusion_radius = 0.2f;  // Adjust as needed
+    float reward_change_threshold = 2.0f;
+    float reward_diff = std::abs(reward - previous_reward_);
+    if (!std::isnan(previous_reward_) && reward_diff > reward_change_threshold) {
+        RCLCPP_WARN(node_->get_logger(), "Skipping state: sudden reward change detected");
+    } else {
+      state_buffer_publisher_->publish(msg);
+    }
   }
-
+  //RCLCPP_INFO(node_->get_logger(), "Previous Reward: %f, Current Reward: %f", previous_reward_, reward);
   // 3. Select action (inference or exploration)
   std::vector<float> action(3);
 
@@ -229,9 +245,11 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
   }
 
   // 5. Update previous state and action
-  previous_state_ = state;
-  previous_action_ = action;
-  last_goal_distance_ = (goal_pos_ - robot_pos_).length();
+    previous_state_ = state;
+    previous_action_ = action;
+    previous_reward_ = reward;
+    last_goal_distance_ = (goal_pos_ - robot_pos_).length();
+
 
   if (cancel_requested_)
   {
@@ -259,7 +277,14 @@ bool RLMeshController::isGoalReached(double dist_tolerance, double angle_toleran
 {
   float goal_distance = (goal_pos_ - robot_pos_).length();
   float angle = acos(goal_dir_.dot(robot_dir_));
-  return goal_distance <= static_cast<float>(dist_tolerance) && angle <= static_cast<float>(angle_tolerance);
+  goal_reached_ = goal_distance <= static_cast<float>(dist_tolerance) && angle <= static_cast<float>(angle_tolerance);
+  if (goal_reached_){
+    state_msg_.reward += 5;  // Reward for reaching the goal
+    if (state_msg_.reward >10)
+      state_msg_.reward = 10;
+    state_buffer_publisher_->publish(state_msg_);
+  }
+  return goal_reached_;
 }
 
 bool RLMeshController::setPlan(const std::vector<geometry_msgs::msg::PoseStamped>& plan)
@@ -386,7 +411,7 @@ std::vector<float> RLMeshController::get_state()
   he.z = goal_dir_.z - robot_dir_.z;
 
   // Set DE, DDE, and HE as the first elements of the state
-  state[0] = de;
+  state[0] = std::round(de);
   state[1] = dde;
   state[2] = he_magnitude;//std::sqrt(std::pow(he.x, 2) + std::pow(he.y, 2) + std::pow(he.z, 2)); //he_magnitude// Magnitude of HE
 
@@ -413,7 +438,7 @@ std::vector<float> RLMeshController::get_state()
     float cos_theta = dot_product / (robot_dir_magnitude * lookahead_dir_magnitude);
     float theta = std::acos(cos_theta);
 
-    state[3 + i * 2] = dl;
+    state[3 + i * 2] = std::round(dl);
     state[4 + i * 2] = theta;
   }
 
@@ -592,6 +617,7 @@ bool RLMeshController::initialize(const std::string& plugin_name,
     "/Spot/odometry", 10, std::bind(&RLMeshController::odomCallback, this, std::placeholders::_1));
   state_buffer_publisher_ = node_->create_publisher<rl_mesh_controller_msgs::msg::StateActionRewardNextState>("/state_buffer", 10);
   exploration_threshold_ = 40.0;  // 40% exploration
+  float previous_reward_ = std::numeric_limits<float>::quiet_NaN();
   previous_de_ = 0.0;
   previous_time_ = node_->now();
   angular_velocity_= 0.0f;
