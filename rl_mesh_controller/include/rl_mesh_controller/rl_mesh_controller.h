@@ -9,6 +9,7 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include "std_msgs/msg/float32_multi_array.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "rl_mesh_controller_msgs/msg/state_action_reward_next_state.hpp"
@@ -176,6 +177,7 @@ private:
   // torch::nn::Sequential critic_;
 
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr state_publisher_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr terminal_state_publisher_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr tensor_action_subscription_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_subscription_;
 

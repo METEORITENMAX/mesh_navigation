@@ -186,9 +186,10 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
 
       //float de_penalty = (initial_distance - new_distance)*state[0];
       float distance_diff = initial_distance - new_distance;
-      float scale_factor = 1000.0f;  // Adjust this value to amplify the effect
+      float scale_factor = 100.0f;  // Adjust this value to amplify the effect
       float scaled_distance_diff = distance_diff * scale_factor;
-      float de_penalty = std::exp(scaled_distance_diff) * distance_diff * (distance_diff > 0 ? 1 : -1) * state[0];
+      float de_penalty = scale_factor * distance_diff  * state[0];
+      //RCLCPP_INFO(node_->get_logger(), "de_penalty: %f , scaled_distance: %f, state de: %f", de_penalty, scaled_distance_diff, state[0]);
       // Heading Error (HE)
       float he = previous_state_[2];
 
@@ -201,6 +202,9 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
       float he_penalty = -Kh * pow(std::abs(he) / (1 + new_distance), Sh);
       // Total reward
       reward = de_penalty + he_penalty;
+
+      RCLCPP_INFO(node_->get_logger(), "de_penalty: %f , scaled_distance: %f, state de: %f, he_penalty: %f", de_penalty, scaled_distance_diff, state[0], he_penalty);
+
 
       float min_reward = -0.1f;
       float max_reward = 0.1f;
@@ -278,11 +282,23 @@ bool RLMeshController::isGoalReached(double dist_tolerance, double angle_toleran
   float goal_distance = (goal_pos_ - robot_pos_).length();
   float angle = acos(goal_dir_.dot(robot_dir_));
   goal_reached_ = goal_distance <= static_cast<float>(dist_tolerance) && angle <= static_cast<float>(angle_tolerance);
+
+  RCLCPP_INFO(node_->get_logger(),
+            "Goal position: [%.2f, %.2f, %.2f], Robot position: [%.2f, %.2f, %.2f]",
+            goal_pos_.x, goal_pos_.y, goal_pos_.z,
+            robot_pos_.x, robot_pos_.y, robot_pos_.z);
+  RCLCPP_INFO(node_->get_logger(), "Goal distance: %.2f", goal_distance);
+
   if (goal_reached_){
-    state_msg_.reward += 5;  // Reward for reaching the goal
-    if (state_msg_.reward >10)
-      state_msg_.reward = 10;
+    state_msg_.reward = 5;  // Reward for reaching the goal
     state_buffer_publisher_->publish(state_msg_);
+    //bool message
+    std_msgs::msg::Bool terminal_state_msg;
+    RCLCPP_INFO_STREAM(node_->get_logger(), "Goal Reached!");
+    robot_pos_ = mesh_map::Vector(0, 0, 0);
+    robot_dir_ = mesh_map::Normal(0, 0, 0);
+    terminal_state_msg.data = true;
+    terminal_state_publisher_->publish(terminal_state_msg);
   }
   return goal_reached_;
 }
@@ -411,7 +427,7 @@ std::vector<float> RLMeshController::get_state()
   he.z = goal_dir_.z - robot_dir_.z;
 
   // Set DE, DDE, and HE as the first elements of the state
-  state[0] = std::round(de);
+  state[0] = std::round(de * 100.0) / 100.0;
   state[1] = dde;
   state[2] = he_magnitude;//std::sqrt(std::pow(he.x, 2) + std::pow(he.y, 2) + std::pow(he.z, 2)); //he_magnitude// Magnitude of HE
 
@@ -611,6 +627,7 @@ bool RLMeshController::initialize(const std::string& plugin_name,
       &RLMeshController::reconfigureCallback, this, std::placeholders::_1));
 
   state_publisher_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>("/model_state", 10);
+  terminal_state_publisher_ = node_->create_publisher<std_msgs::msg::Bool>("/terminal_state",10);
   tensor_action_subscription_ = node_->create_subscription<geometry_msgs::msg::Twist>(
     "/tensor_action", 10, std::bind(&RLMeshController::tensorActionCallback, this, std::placeholders::_1));
   odom_subscription_ = node_->create_subscription<nav_msgs::msg::Odometry>(
