@@ -107,6 +107,15 @@ class CriticNetwork(nn.Module):
 class ActorCriticNode(Node):
     def __init__(self):
         super().__init__('actor_critic_node')
+
+
+        self.current_episode = []  # Store the current episode's transitions
+        self.episode_rewards = 0   # Track cumulative rewards
+        self.episode_count = 0     # Count episodes
+
+        self.max_episode_length = 200  # Set a max step count per episode
+        self.current_step = 0  # Track episode steps
+
         self.state_subscription = self.create_subscription(
             Float32MultiArray,
             '/model_state',
@@ -126,7 +135,7 @@ class ActorCriticNode(Node):
 
         # Initialize the actor and critic networks
         input_size = 10
-        hidden_size = 64
+        hidden_size = 256
         output_size = 3
         self.sigma = 0.1
         self.theta = 0.15
@@ -149,7 +158,7 @@ class ActorCriticNode(Node):
         self.get_logger().info('ActorCriticNode initialized.')
 
         # Define the loss function and optimizers
-        self.lr = 1e-7
+        self.lr = 1e-2
         self.critic_criterion = nn.MSELoss()
         self.value_criterion = nn.MSELoss()
         self.value_optimizer = optim.Adam(self.value.parameters(), lr=self.lr)
@@ -158,7 +167,7 @@ class ActorCriticNode(Node):
 
 
         # Discount factor for future rewards
-        self.gamma = 0.9
+        self.gamma = 0.8
 
         # Initialize exploration chance
         self.exploration_chance = 0.0
@@ -166,10 +175,10 @@ class ActorCriticNode(Node):
         #self.replay_buffer_neg = ReplayBuffer(capacity=4096)
         self.long_term_buffer_neg = ReplayBuffer(capacity=10000)
         self.long_term_buffer_pos = ReplayBuffer(capacity=10000)
-        self.batch_size = 32
+        self.batch_size = 5000
         self.longterm_batch_size = 500
         #Create timers
-        self.create_timer(2., self.train)
+        #self.create_timer(2., self.train)
         self.create_timer(30.0, self.reset_uhlennoise)
         # Exploration phase settings
         self.max_exploration_time = 300  # Stop after 5 minutes (300 sec)
@@ -190,7 +199,8 @@ class ActorCriticNode(Node):
             'Gamma': self.gamma,
             'Tau': self.tau,
             'Sigma': self.sigma,
-            'Theta': self.theta
+            'Theta': self.theta,
+            'neurons' : hidden_size
         }
         # Start the plotting thread
         self.plotting_thread = threading.Thread(target=self.plot_losses)
@@ -198,7 +208,7 @@ class ActorCriticNode(Node):
 
     def plot_losses(self):
         plt.ion()
-        fig, axs = plt.subplots(5, 1, figsize=(8, 20))  # 4 subplots (1 for loss, 3 for action components)
+        fig, axs = plt.subplots(6, 1, figsize=(8, 20))  # 4 subplots (1 for loss, 3 for action components)
         plt.show(block=False)  # Ensure the plot is displayed
         # Add global parameters as text box at the top
         param_text = '\n'.join([f'{key}: {value}' for key, value in self.global_params.items()])
@@ -230,14 +240,22 @@ class ActorCriticNode(Node):
 
                     # Plot Reward, DE, and HE Lists in one graph
                     if len(self.reward_list) > 0:
-                        min_length = min(len(self.reward_list), len(self.de_list), len(self.he_list))
+                        min_length = len(self.reward_list)
+
+                        # Plot DE and HE on axs[4]
                         axs[4].clear()
-                        axs[4].plot(range(min_length), self.reward_list[:min_length], label='Reward', color='green')
-                        axs[4].plot(range(min_length), self.de_list[:min_length], label='DE', color='purple')
-                        axs[4].plot(range(min_length), self.he_list[:min_length], label='HE', color='brown')
+                        axs[4].plot(range(min(len(self.de_list), min_length)), self.de_list[:min(len(self.de_list), min_length)], label='DE', color='purple')
+                        axs[4].plot(range(min(len(self.he_list), min_length)), self.he_list[:min(len(self.he_list), min_length)], label='HE', color='brown')
                         axs[4].set_xlabel('Steps')
-                        axs[4].set_ylabel('Values')
+                        axs[4].set_ylabel('DE/HE Values')
                         axs[4].legend()
+
+                        # Plot Reward on its own axis (e.g., axs[5])
+                        axs[5].clear()
+                        axs[5].plot(range(min_length), self.reward_list[:min_length], label='Reward', color='green')
+                        axs[5].set_xlabel('Steps')
+                        axs[5].set_ylabel('Reward')
+                        axs[5].legend()
 
                     fig.canvas.draw()
                     fig.canvas.flush_events()
@@ -304,52 +322,74 @@ class ActorCriticNode(Node):
         normalized_state = self.normalize_input(state)
         normalized_next_state = self.normalize_input(next_state)
 
-        self.reward_list.append(reward.item())
+        self.current_episode.append((normalized_state, action, reward, normalized_next_state))
+        self.episode_rewards += reward.item()
+        self.current_step += 1
+
+        self.reward_list.append(self.episode_rewards)
         self.de_list.append(normalized_state[0][0].item())
         self.he_list.append(normalized_state[0][2].item())
         #self.get_logger().info(f'normalized_state: {normalized_state}')
 
-        if abs(reward) > 1.0:
-            if reward > .0:
-                self.long_term_buffer_pos.push(normalized_state, action, reward, normalized_next_state)
-            else:
-                self.long_term_buffer_neg.push(normalized_state, action, reward, normalized_next_state)
+        if msg.is_terminal_state:
+            self.end_episode()
 
-        self.replay_buffer.push(normalized_state, action, reward, normalized_next_state)
+        # if abs(reward) > 1.0:
+        #     if reward > .0:
+        #         self.long_term_buffer_pos.push(normalized_state, action, reward, normalized_next_state)
+        #     else:
+        #         self.long_term_buffer_neg.push(normalized_state, action, reward, normalized_next_state)
+
+        # self.replay_buffer.push(normalized_state, action, reward, normalized_next_state)
 
         # Train if the buffer is large enough
         # if len(self.replay_buffer) >= self.batch_size:
         #     self.train()
+    def end_episode(self):
+        for transition in self.current_episode:
+            self.replay_buffer.push(*transition)
 
+        self.get_logger().info(f'Episode {self.episode_count} finished with total reward: {self.episode_rewards}')
+
+        self.train()
+        # Reset for the next episode
+        self.current_episode = []
+        self.episode_rewards = 0
+        self.current_step = 0
+        self.episode_count += 1
     def train(self):
         self.get_logger().info(f'+++++++++++++++++++++++++++++++++++++++******TRAINING******+++++++++++++++++++++++++++++++++++++++')
 
         # Ensure the replay buffer has enough data before training
-        if len(self.replay_buffer) < self.batch_size:
+        #if replay buffer is empty
+        if len(self.replay_buffer) == 0:
             self.get_logger().info(f'Not enough data in replay buffer. Size: {len(self.replay_buffer)}')
             return
-
-        # Sample from the live replay buffer first
-        batch_size_live = min(self.batch_size, len(self.replay_buffer))
-        state_batch, action_batch, reward_batch, next_state_batch = self.replay_buffer.sample(batch_size_live)
-
-        batch_size_pos = min(self.longterm_batch_size // 2, len(self.long_term_buffer_pos))
-        batch_size_neg = min(self.longterm_batch_size // 2, len(self.long_term_buffer_neg))
-
-        if batch_size_pos > 0:
-            state_batch_pos, action_batch_pos, reward_batch_pos, next_state_batch_pos = self.long_term_buffer_pos.sample(batch_size_pos)
-        if batch_size_neg > 0:
-            state_batch_neg, action_batch_neg, reward_batch_neg, next_state_batch_neg = self.long_term_buffer_neg.sample(batch_size_neg)
-
-        # Combine all batches together
-        if batch_size_pos > 0 and batch_size_neg > 0:
-            state_batch = torch.cat([state_batch, state_batch_pos, state_batch_neg], dim=0)
-            action_batch = torch.cat([action_batch, action_batch_pos, action_batch_neg], dim=0)
-            reward_batch = torch.cat([reward_batch, reward_batch_pos, reward_batch_neg], dim=0).view(-1, 1)
-            next_state_batch = torch.cat([next_state_batch, next_state_batch_pos, next_state_batch_neg], dim=0)
-            self.get_logger().info(f'Using both buffers: {self.batch_size} from live + {self.longterm_batch_size} from long-term')
-
+        # Sample only from the replay buffer
+        sample_size = min(self.batch_size, len(self.replay_buffer.buffer))
+        state_batch, action_batch, reward_batch, next_state_batch = self.replay_buffer.sample(sample_size)
         reward_batch = reward_batch.view(-1, 1)
+        # # Sample from the live replay buffer first
+        # batch_size_live = min(self.batch_size, len(self.replay_buffer))
+        # state_batch, action_batch, reward_batch, next_state_batch = self.replay_buffer.sample(batch_size_live)
+
+        # batch_size_pos = min(self.longterm_batch_size // 2, len(self.long_term_buffer_pos))
+        # batch_size_neg = min(self.longterm_batch_size // 2, len(self.long_term_buffer_neg))
+
+        # if batch_size_pos > 0:
+        #     state_batch_pos, action_batch_pos, reward_batch_pos, next_state_batch_pos = self.long_term_buffer_pos.sample(batch_size_pos)
+        # if batch_size_neg > 0:
+        #     state_batch_neg, action_batch_neg, reward_batch_neg, next_state_batch_neg = self.long_term_buffer_neg.sample(batch_size_neg)
+
+        # # Combine all batches together
+        # if batch_size_pos > 0 and batch_size_neg > 0:
+        #     state_batch = torch.cat([state_batch, state_batch_pos, state_batch_neg], dim=0)
+        #     action_batch = torch.cat([action_batch, action_batch_pos, action_batch_neg], dim=0)
+        #     reward_batch = torch.cat([reward_batch, reward_batch_pos, reward_batch_neg], dim=0).view(-1, 1)
+        #     next_state_batch = torch.cat([next_state_batch, next_state_batch_pos, next_state_batch_neg], dim=0)
+        #     self.get_logger().info(f'Using both buffers: {self.batch_size} from live + {self.longterm_batch_size} from long-term')
+
+        # reward_batch = reward_batch.view(-1, 1)
         #self.get_logger().info(f'Using both buffers: {state_batch} from live + {reward_batch} from long-term')
 
         # Compute target Q-values
