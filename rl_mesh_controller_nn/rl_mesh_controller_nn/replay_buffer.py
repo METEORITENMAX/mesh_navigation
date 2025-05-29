@@ -7,16 +7,19 @@ class ReplayBuffer:
         self.buffer = []
         self.position = 0
 
-    def push(self, state, action, reward, next_state):
+    def push(self, state, action, reward, next_state, done):
         if len(self.buffer) < self.capacity:
             self.buffer.append(None)
-        self.buffer[self.position] = (state, action, reward, next_state)
+        self.buffer[self.position] = (state, action, reward, next_state, done)
         self.position = (self.position + 1) % self.capacity
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
-        state, action, reward, next_state = zip(*batch)
-        return torch.cat(state), torch.cat(action), torch.cat(reward), torch.cat(next_state)
+        state, action, reward, next_state, done = zip(*batch)
+        return (torch.cat(state), torch.cat(action),
+                torch.tensor(reward, dtype=torch.float32).view(-1, 1),
+                torch.cat(next_state),
+                torch.tensor(done, dtype=torch.float32).view(-1, 1))
     def clear(self):
         self.buffer = []
         self.position = 0

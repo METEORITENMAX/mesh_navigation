@@ -188,7 +188,12 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
       float distance_diff = initial_distance - new_distance;
       float scale_factor = 100.0f;  // Adjust this value to amplify the effect
       float scaled_distance_diff = distance_diff * scale_factor;
-      float de_penalty = scale_factor * distance_diff  * state[0];
+
+      // Scale using tanh
+      float scale_de = 10.0f;
+      float de_penalty = 20.0f * std::tanh(scale_de * distance_diff);
+      //float de_penalty = scale_factor * distance_diff * pow(std::abs(distance_diff+0.0001), -0.2);
+      //float de_penalty = distance_diff; //* state[0];
       //RCLCPP_INFO(node_->get_logger(), "de_penalty: %f , scaled_distance: %f, state de: %f", de_penalty, scaled_distance_diff, state[0]);
       // Heading Error (HE)
       float he = previous_state_[2];
@@ -196,14 +201,44 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
       // Heading Error (HE) Penalty
       //float he_penalty = he / (1 + new_distance);  // Scale down HE penalty when distance error increases
       float Kh = .5f;  // Tune this value
-      float Sh = .5f;  // Shape factor for scaling
+      float Sh = .7f;  // Shape factor for scaling
       float distance_weight = std::min(1.0f, 1.0f / (new_distance + 0.1f));  // Avoid division by zero
       // float he_penalty = -Kh * pow(std::abs(he), Sh) * distance_weight;
-      float he_penalty = -Kh * pow(std::abs(he) / (1 + new_distance), Sh);
+
+      // float w_he = 5.0f;
+      // float he_abs = std::abs(he);
+      // float he_penalty;
+      // if(he_abs > .2) {
+      //     // Apply a strong penalty if heading error is above the threshold.
+      //     he_penalty = -5.; // Adjust this constant as needed.
+      // } else {
+      //     he_penalty = -w_he * he_abs;
+      // }
+      // Smooth HE Penalty (tanh-based with tolerance)
+      float he_penalty;
+      float scale = 20.0f;
+      float tolerance = 0.2f;
+      float steepness = 3.0f;
+      float he_abs = std::abs(he);
+
+      if (he_abs > tolerance) {
+          he_penalty = -scale * std::tanh((he_abs - tolerance) * steepness);
+      } else {
+          he_penalty = 0.0f; // Within tolerance, no penalty
+      }
+      //RCLCPP_INFO(node_->get_logger(), "he: %f, he_penalty: %f", he, he_penalty);
+
       // Total reward
       reward = de_penalty + he_penalty;
-
-      RCLCPP_INFO(node_->get_logger(), "de_penalty: %f , scaled_distance: %f, state de: %f, he_penalty: %f", de_penalty, scaled_distance_diff, state[0], he_penalty);
+      // float simple_reward = 0.0f;
+      // if (reward > 0.0f) {
+      //     simple_reward = 1.0f;
+      // } else if (reward < 0.0f) {
+      //     simple_reward = -1.0f;
+      // } else {
+      //     simple_reward = 0.0f;
+      // }
+      RCLCPP_INFO(node_->get_logger(), "reward: %f, de_penalty: %f, distance_diff: %f, he_penalty: %f, he: %f", reward, de_penalty, distance_diff, he_penalty, he);
 
 
       float min_reward = -0.1f;
@@ -222,13 +257,14 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
     msg.action = previous_action_;
     msg.reward = reward;
     msg.next_state = state;
+    msg.is_terminal_state = false;
     state_msg_ = msg;
     // Define exclusion radius
     float exclusion_radius = 0.2f;  // Adjust as needed
-    float reward_change_threshold = 2.0f;
+    float reward_change_threshold = 15.0f;
     float reward_diff = std::abs(reward - previous_reward_);
     if (!std::isnan(previous_reward_) && reward_diff > reward_change_threshold) {
-        RCLCPP_WARN(node_->get_logger(), "Skipping state: sudden reward change detected");
+        //RCLCPP_WARN(node_->get_logger(), "Skipping state: sudden reward change detected");
     } else {
       state_buffer_publisher_->publish(msg);
     }
@@ -239,13 +275,18 @@ uint32_t RLMeshController::computeVelocityCommands(const geometry_msgs::msg::Pos
 
   // 4. Execute action
   if (received_twist_) {
-      cmd_vel.twist.linear.x = std::min(config_.max_lin_velocity, received_twist_->linear.x * config_.lin_vel_factor);
-      cmd_vel.twist.linear.y = std::min(config_.max_lin_velocity, received_twist_->linear.y * config_.lin_vel_factor);
-      cmd_vel.twist.angular.z = std::min(config_.max_ang_velocity, received_twist_->angular.z * config_.ang_vel_factor);
-      cmd_vel.header.stamp = node_->now();
-      action[0] = cmd_vel.twist.linear.x;
-      action[1] = cmd_vel.twist.linear.y;
-      action[2] = cmd_vel.twist.angular.z;
+      //cmd_vel.twist.linear.x = std::min(config_.max_lin_velocity, velocities[0] * config_.lin_vel_factor);
+      //cmd_vel.twist.angular.z = std::min(config_.max_ang_velocity, velocities[1] * config_.ang_vel_factor);
+    cmd_vel.twist.linear.x = std::clamp(received_twist_->linear.x * config_.lin_vel_factor,
+                                    -config_.lin_vel_factor, config_.lin_vel_factor);
+    cmd_vel.twist.linear.y = std::clamp(received_twist_->linear.y * config_.lin_vel_factor,
+                                        -config_.lin_vel_factor, config_.lin_vel_factor);
+    cmd_vel.twist.angular.z = std::clamp(received_twist_->angular.z * config_.ang_vel_factor,
+                                        -config_.ang_vel_factor, config_.ang_vel_factor);
+    cmd_vel.header.stamp = node_->now();
+    action[0] = cmd_vel.twist.linear.x;
+    action[1] = cmd_vel.twist.linear.y;
+    action[2] = cmd_vel.twist.angular.z;
   }
 
   // 5. Update previous state and action
@@ -283,22 +324,31 @@ bool RLMeshController::isGoalReached(double dist_tolerance, double angle_toleran
   float angle = acos(goal_dir_.dot(robot_dir_));
   goal_reached_ = goal_distance <= static_cast<float>(dist_tolerance) && angle <= static_cast<float>(angle_tolerance);
 
-  RCLCPP_INFO(node_->get_logger(),
-            "Goal position: [%.2f, %.2f, %.2f], Robot position: [%.2f, %.2f, %.2f]",
-            goal_pos_.x, goal_pos_.y, goal_pos_.z,
-            robot_pos_.x, robot_pos_.y, robot_pos_.z);
-  RCLCPP_INFO(node_->get_logger(), "Goal distance: %.2f", goal_distance);
+  // RCLCPP_INFO(node_->get_logger(),
+  //           "Goal position: [%.2f, %.2f, %.2f], Robot position: [%.2f, %.2f, %.2f]",
+  //           goal_pos_.x, goal_pos_.y, goal_pos_.z,
+  //           robot_pos_.x, robot_pos_.y, robot_pos_.z);
+  // RCLCPP_INFO(node_->get_logger(), "Goal distance: %.2f", goal_distance);
 
-  if (goal_reached_){
-    state_msg_.reward = 5;  // Reward for reaching the goal
-    state_buffer_publisher_->publish(state_msg_);
-    //bool message
-    std_msgs::msg::Bool terminal_state_msg;
-    RCLCPP_INFO_STREAM(node_->get_logger(), "Goal Reached!");
-    robot_pos_ = mesh_map::Vector(0, 0, 0);
-    robot_dir_ = mesh_map::Normal(0, 0, 0);
-    terminal_state_msg.data = true;
-    terminal_state_publisher_->publish(terminal_state_msg);
+
+  // Check elapsed time since plan start
+  rclcpp::Time now = node_->now();
+  double elapsed_sec = (now - plan_start_time_).seconds();
+  if (plan_active_){
+
+    if (goal_reached_){
+      state_msg_.reward = 1000./elapsed_sec;  // Reward for reaching the goal
+      state_msg_.is_terminal_state = true;
+      state_buffer_publisher_->publish(state_msg_);
+      //bool message
+      std_msgs::msg::Bool terminal_state_msg;
+      RCLCPP_INFO_STREAM(node_->get_logger(), "Goal Reached!");
+      robot_pos_ = mesh_map::Vector(0, 0, 0);
+      robot_dir_ = mesh_map::Normal(0, 0, 0);
+      terminal_state_msg.data = true;
+      terminal_state_publisher_->publish(terminal_state_msg);
+      plan_active_ = false;
+    }
   }
   return goal_reached_;
 }
@@ -324,8 +374,51 @@ bool RLMeshController::setPlan(const std::vector<geometry_msgs::msg::PoseStamped
   goal_dir_ = poseToDirectionVector(current_plan_.back());
   // reset current and ahead face
   cancel_requested_ = false;
+  plan_active_ = true;
   current_face_ = lvr2::OptionalFaceHandle();
+  initial_goal_distance_ = (goal_pos_ - robot_pos_).length();
+
+  // Record plan start time
+  plan_start_time_ = node_->now();
+  elapsed_timer_ = node_->create_wall_timer(
+    std::chrono::seconds(1),
+    std::bind(&RLMeshController::checkElapsedTime, this));
+
   return true;
+}
+
+void RLMeshController::checkElapsedTime()
+{
+  // print robot_pos_.z
+  RCLCPP_INFO(node_->get_logger(), "Robot Position: (%f, %f, %f)", robot_pos_.x, robot_pos_.y, robot_pos_.z);
+  if (plan_active_) {
+    rclcpp::Time now = node_->now();
+    double elapsed_sec = (now - plan_start_time_).seconds();
+    if (elapsed_sec > 30.0  || ((goal_pos_ - robot_pos_).length() - initial_goal_distance_) > 0.3 || robot_pos_.z > 0.25) {
+      // Publish reward for not reaching the goal
+      //state_msg_.reward = -50.;
+      state_msg_.is_terminal_state = false;
+      state_buffer_publisher_->publish(state_msg_);
+
+      std_msgs::msg::Bool terminal_state_msg;
+      RCLCPP_INFO_STREAM(node_->get_logger(), "Goal Not Reached in the given Time frame of 15s!");
+
+      // Reset robot values if required
+      robot_pos_ = mesh_map::Vector(0, 0, 0);
+      robot_dir_ = mesh_map::Normal(0, 0, 0);
+
+      terminal_state_msg.data = true;
+      terminal_state_publisher_->publish(terminal_state_msg);
+
+      plan_active_ = false;
+
+      // Stop the timer since the plan is no longer active
+      elapsed_timer_->cancel();
+    }
+  } else {
+    // If plan is no longer active, cancel the timer to avoid unnecessary callbacks.
+    elapsed_timer_->cancel();
+  }
 }
 
 bool RLMeshController::cancel()
@@ -422,9 +515,9 @@ std::vector<float> RLMeshController::get_state()
   float he_magnitude = std::acos(std::clamp(cos_theta, -1.0f, 1.0f)); // Angle in radians
   // Calculate Heading Error (HE)
   geometry_msgs::msg::Vector3 he;
-  he.x = goal_dir_.x - robot_dir_.x;
-  he.y = goal_dir_.y - robot_dir_.y;
-  he.z = goal_dir_.z - robot_dir_.z;
+  // he.x = goal_dir_.x - robot_dir_.x;
+  // he.y = goal_dir_.y - robot_dir_.y;
+  // he.z = goal_dir_.z - robot_dir_.z;
 
   // Set DE, DDE, and HE as the first elements of the state
   state[0] = std::round(de * 100.0) / 100.0;
@@ -459,11 +552,7 @@ std::vector<float> RLMeshController::get_state()
   }
 
   state[9] = angular_velocity_;  // Angular velocity
-  //print state size
-  //RCLCPP_INFO(node_->get_logger(), "state size: %d", state.size());
-  // RCLCPP_INFO(node_->get_logger(), "State: robot_pos: (%f, %f, %f), robot_dir: (%f, %f, %f), lookahead_points: (%f, %f, %f), (%f, %f, %f), (%f, %f, %f)",
-  //             state[0], state[1], state[2], state[3], state[4], state[5],
-  //             state[6], state[7], state[8], state[9], state[10], state[11]);
+
 
   return std::vector<float>(state.begin(), state.end());
 }

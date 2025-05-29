@@ -170,6 +170,7 @@ private:
   //! flag to handle cancel requests
   std::atomic_bool cancel_requested_;
 
+
   // handle of callback for changing parameters dynamically
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr reconfiguration_callback_handle_;
 
@@ -185,6 +186,9 @@ private:
 
   geometry_msgs::msg::Twist::SharedPtr received_twist_;
 
+  rclcpp::TimerBase::SharedPtr elapsed_timer_;
+  std::atomic_bool plan_active_;
+
   std::vector<float> previous_state_;
   std::vector<float> previous_action_;
   float last_goal_distance_;
@@ -193,6 +197,7 @@ private:
   float angular_velocity_;
   float previous_reward_;
   bool goal_reached_;
+  rclcpp::Time plan_start_time_;
   rclcpp::Time previous_time_;
   rl_mesh_controller_msgs::msg::StateActionRewardNextState state_msg_;
 
@@ -201,9 +206,11 @@ private:
   size_t batch_size_ = 128;
   bool training_mode_ = true;
 
+  float initial_goal_distance_ = 0.0;
   void trainModel();
   void tensorActionCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
   void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
+  void checkElapsedTime();
 
 
   struct {
