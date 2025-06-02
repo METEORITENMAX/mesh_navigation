@@ -153,7 +153,7 @@ private:
   std::vector<geometry_msgs::msg::PoseStamped> current_plan_;
 
   //! the goal and robot pose
-  mesh_map::Vector goal_pos_, robot_pos_;
+  mesh_map::Vector goal_pos_, robot_pos_, last_progress_pos_;
 
   //! the goal's and robot's orientation
   mesh_map::Normal goal_dir_, robot_dir_;
@@ -197,6 +197,10 @@ private:
   float angular_velocity_;
   float previous_reward_;
   bool goal_reached_;
+
+  int success_count_;
+  int failure_count_;
+  rclcpp::Time last_progress_time_;
   rclcpp::Time plan_start_time_;
   rclcpp::Time previous_time_;
   rl_mesh_controller_msgs::msg::StateActionRewardNextState state_msg_;

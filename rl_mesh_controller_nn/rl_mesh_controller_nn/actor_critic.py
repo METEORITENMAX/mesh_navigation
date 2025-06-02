@@ -51,18 +51,19 @@ class ActorNetwork(nn.Module):
         self.fc2 = nn.Linear(nodes, nodes)
         self.mean = nn.Linear(nodes, action_dim)
         self.log_std = nn.Linear(nodes, action_dim)
-        self.log_std.weight.data.uniform_(-3, -2)
-        self.log_std.bias.data.uniform_(-3, -2)
-        self.log_std.weight.data.fill_(-1)
-        self.log_std.bias.data.fill_(-1)
+        # Initialize weights and biases
+        nn.init.uniform_(self.mean.weight, -0.003, 0.003)
+        nn.init.constant_(self.mean.bias, 0.0)
 
+        nn.init.uniform_(self.log_std.weight, -0.003, 0.003)
+        nn.init.constant_(self.log_std.bias, -0.5)
         self.max_action = max_action
-        self.min_log_std = -5.
-        self.max_log_std = 2.
+        self.min_log_std = -3.
+        self.max_log_std = 1.
 
     def forward(self, state):
-        x = torch.tanh(self.fc1(state))  # Tanh activation
-        x = torch.tanh(self.fc2(x))
+        x = F.leaky_relu(self.fc1(state), negative_slope=0.01)
+        x = F.leaky_relu(self.fc2(x), negative_slope=0.01)
         #mean = torch.tanh(self.mean(x)) * self.max_action  # Squash mean to [-max_action, max_action]
         mean = self.mean(x)
         log_std = self.log_std(x).clamp(self.min_log_std, self.max_log_std)
@@ -72,19 +73,22 @@ class ActorNetwork(nn.Module):
 
     def sample(self, state):
         mean, std = self.forward(state)
-        std = std.clamp(min=1e-6)
-        print("mean requires grad:", mean.requires_grad, "std requires grad:", std.requires_grad)
+        std = std.clamp(min=0.2, max=1.)  # Ensure std is not too small or too large
+        # print("mean:", mean)
+        # print("std:", std)
         if torch.isnan(mean).any() or torch.isnan(std).any():
-            #self.get_logger().error(f"NaN detected in mean or std: mean={mean}, std={std}")
+            self.get_logger().error(f"NaN detected in mean or std: mean={mean}, std={std}")
             mean = torch.zeros_like(mean)
             std = torch.ones_like(std) * 0.1
 
         normal = torch.distributions.Normal(mean, std)
-        z = normal.rsample()  # Reparametrization trick
+        z = normal.rsample()  # Reparametrization trick gauss + deterministic output of nn for differentiability
         action = torch.tanh(z) * self.max_action
+        action[0] = action [0] * self.max_action  # Scale action to [-max_action, max_action]
+        action[1] = action[1]* 0.2
 
         log_prob = normal.log_prob(z)
-        log_prob -= torch.log(torch.clamp(1 - action.pow(2), min=1e-6))  # Make sure this is differentiable
+        log_prob -= torch.log(torch.clamp(1 - action.pow(2) + 1e-6, min=1e-6))
         log_prob = log_prob.sum(dim=-1, keepdim=True)
 
         return action, log_prob
@@ -99,12 +103,12 @@ class CriticNetwork(nn.Module):
 
     def forward(self, state, action):
         x = torch.cat([state, action], dim=1)
-        x = torch.tanh(self.fc1(x))  # Tanh activation
-        x = torch.tanh(self.fc2(x))  # Tanh activation
+        x = F.leaky_relu(self.fc1(x), negative_slope=0.01)
+        x = F.leaky_relu(self.fc2(x), negative_slope=0.01)
         return self.fc3(x)
 
 class SAC(Node):
-    def __init__(self, nodes = 128, state_dim=10, action_dim=3, max_action=0.5, lr=1e-3, gamma=0.9, tau=0.005, alpha=.1):
+    def __init__(self, nodes = 256, state_dim=4, action_dim=2, max_action=0.2, lr=1e-3, gamma=0.9, tau=0.005, alpha=0.5):
         super().__init__('actor_critic_node')
         self.actor = ActorNetwork(nodes, state_dim, action_dim, max_action)
         self.critic1 = CriticNetwork(nodes,state_dim, action_dim)
@@ -114,20 +118,20 @@ class SAC(Node):
         self.target_critic1.load_state_dict(self.critic1.state_dict())
         self.target_critic2.load_state_dict(self.critic2.state_dict())
 
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
-        self.critic1_optimizer = optim.Adam(self.critic1.parameters(), lr=lr)
-        self.critic2_optimizer = optim.Adam(self.critic2.parameters(), lr=lr)
-
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=3e-4)
+        self.critic1_optimizer = optim.Adam(self.critic1.parameters(), lr=1e-3)
+        self.critic2_optimizer = optim.Adam(self.critic2.parameters(), lr=1e-3)
+        self.state_dim = state_dim
         #self.target_entropy = -torch.prod(torch.Tensor([action_dim])).item()#-action_dim  # or another target based on your design
-        self.target_entropy = -float(action_dim)
+        self.target_entropy = -2
         #self.log_alpha = torch.tensor(np.log(alpha), requires_grad=True)
         #self.log_alpha = nn.Parameter(torch.zeros(1, requires_grad=True))  # Ensure alpha is a trainable parameter
 
         self.log_alpha = nn.Parameter(torch.tensor(np.log(alpha), dtype=torch.float32))
-        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=lr)
+        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=1e-3)
 
         self.gamma = gamma
-        self.alpha = alpha
+        self.alpha = alpha #self.log_alpha.exp()  # Convert log_alpha to alpha
         #Noise
         self.tau = tau
         self.sigma = 0.2
@@ -163,7 +167,7 @@ class SAC(Node):
         # Initialize the actor and critic networks
 
 
-        self.noise_process = OrnsteinUhlenbeckNoise(action_dim=3, mu=0, theta=self.theta, sigma=self.sigma)
+        self.noise_process = OrnsteinUhlenbeckNoise(action_dim=2, mu=0, theta=self.theta, sigma=self.sigma)
 
         self.get_logger().info('ActorCriticNode initialized.')
 
@@ -173,10 +177,10 @@ class SAC(Node):
         #self.replay_buffer_neg = ReplayBuffer(capacity=4096)
         self.long_term_buffer_neg = ReplayBuffer(capacity=10000)
         self.long_term_buffer_pos = ReplayBuffer(capacity=10000)
-        self.batch_size = 32
+        self.batch_size = 512
         self.longterm_batch_size = 500
         #Create timers
-        #self.create_timer(2., self.train)
+        self.create_timer(3., self.train)
         self.create_timer(30.0, self.reset_uhlennoise)
         # Exploration phase settings
         self.max_exploration_time = 300  # Stop after 5 minutes (300 sec)
@@ -203,7 +207,13 @@ class SAC(Node):
         # Start the plotting thread
         self.plotting_thread = threading.Thread(target=self.plot_losses)
         self.plotting_thread.start()
-
+    #     self.actor.apply(init_weights)
+    #     self.critic1.apply(init_weights)
+    #     self.critic2.apply(init_weights)
+    # def init_weights(m):
+    #     if isinstance(m, nn.Linear):
+    #         nn.init.xavier_uniform_(m.weight)
+    #         nn.init.zeros_(m.bias)
     """ state:
     0: de
     1: dee
@@ -224,58 +234,55 @@ class SAC(Node):
         sample_size = min(self.batch_size, len(self.replay_buffer.buffer))
         state, action, reward, next_state, done = self.replay_buffer.sample(sample_size)
         #reward = (reward - reward.mean()) / (reward.std() + 1e-6)
-        done = self.episode_succeeded
-        self.get_logger().info(f'done: {done}')
+        #done = self.episode_succeeded
+        #self.get_logger().info(f'done: {done}')
         # --- Compute target Q-value ---
+
         with torch.no_grad():
             next_action, next_log_prob = self.actor.sample(next_state)
-            next_log_prob = next_log_prob.detach()
             target_q1 = self.target_critic1(next_state, next_action)
             target_q2 = self.target_critic2(next_state, next_action)
-            self.get_logger().info(f"next_log_prob requires grad: {next_log_prob.requires_grad}")
-            # Compute the entropy loss for automatic tuning
             target_q = torch.min(target_q1, target_q2) - self.alpha * next_log_prob
-            target_value = reward + self.gamma * target_q
+            target_value = reward + self.gamma * (1 - done.float()) * target_q
 
-        new_action, log_prob = self.actor.sample(state)
-        alpha_loss = -(self.log_alpha * (log_prob.detach() + self.target_entropy)).mean()
-        # Update log_alpha via its optimizer
-        self.alpha_optimizer.zero_grad()
-        alpha_loss.backward()
-        self.alpha_optimizer.step()
-        self.alpha = self.log_alpha.exp()
-        self.get_logger().info(f"alpha: {self.alpha}")
-
-        # --- Update Critic Networks ---
+        # Update Critics
         q1 = self.critic1(state, action)
         q2 = self.critic2(state, action)
         loss_q1 = F.mse_loss(q1, target_value)
         loss_q2 = F.mse_loss(q2, target_value)
 
-        for _ in range(1):  # Train critic twice for every actor update
-            self.critic1_optimizer.zero_grad()
-            loss_q1.backward()
-            self.critic1_optimizer.step()
-
-            self.critic2_optimizer.zero_grad()
-            loss_q2.backward()
-            self.critic2_optimizer.step()
-
+        self.critic1_optimizer.zero_grad()
+        loss_q1.backward()
         torch.nn.utils.clip_grad_norm_(self.critic1.parameters(), max_norm=1.0)
+        self.critic1_optimizer.step()
+
+        self.critic2_optimizer.zero_grad()
+        loss_q2.backward()
         torch.nn.utils.clip_grad_norm_(self.critic2.parameters(), max_norm=1.0)
-        # --- Update Actor Network ---
+        self.critic2_optimizer.step()
+
+
         new_action, log_prob = self.actor.sample(state)
+        # Update Alpha
+        alpha_loss = -(self.log_alpha * (log_prob.detach() + self.target_entropy)).mean()
+        self.alpha_optimizer.zero_grad()
+        alpha_loss.backward()
+        self.alpha_optimizer.step()
+        #self.alpha = self.log_alpha.exp()
+
+        # Update Actor
+
+        #print("new_action:", log_prob)
         q1_new = self.critic1(state, new_action)
         q2_new = self.critic2(state, new_action)
         min_q_new = torch.min(q1_new, q2_new)
-
         actor_loss = (self.alpha * log_prob - min_q_new).mean()
 
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
-
         self.actor_optimizer.step()
+
 
         # --- Soft update target networks ---
         for target_param, param in zip(self.target_critic1.parameters(), self.critic1.parameters()):
@@ -296,27 +303,29 @@ class SAC(Node):
         # Process the StateActionRewardNextState message
 
 
-        state = torch.tensor(msg.state, dtype=torch.float32, requires_grad=True).view(-1, 10)
-        action = torch.tensor(msg.action, dtype=torch.float32).view(-1, 3)
+        state = torch.tensor(msg.state, dtype=torch.float32, requires_grad=True).view(-1, self.state_dim)
+        action = torch.tensor(msg.action, dtype=torch.float32).view(-1, 2)
         reward = torch.tensor(msg.reward, dtype=torch.float32).view(-1, 1)
-        next_state = torch.tensor(msg.next_state, dtype=torch.float32, requires_grad=True).view(-1, 10)
+        next_state = torch.tensor(msg.next_state, dtype=torch.float32, requires_grad=True).view(-1, self.state_dim)
         done = torch.tensor(msg.is_terminal_state, dtype=torch.float32).view(-1, 1)
 
         if done.item() == True:
             self.episode_succeeded = True
-        #self.get_logger().info("State Buffer Callback")
-        #self.get_logger().info(f'State: {state}, Action: {action}, Reward: {reward}, Next State: {next_state}')
-        normalized_state = self.normalize_input(state)
-        normalized_next_state = self.normalize_input(next_state)
+
         self.episode_rewards += reward.item()
         #self.replay_buffer.push(state, action, reward, next_state, done)
-        self.current_episode.append((state, action, reward, next_state, done))
+
 
         self.current_step += 1
 
-        self.reward_list.append(self.episode_rewards)
-        self.de_list.append(state[0][0].item())
-        self.he_list.append(state[0][2].item())
+
+        if state.size(0) > 0:
+            self.current_episode.append((state, action, reward, next_state, done))
+            self.reward_list.append(self.episode_rewards)
+            self.de_list.append(state[0][0].item())
+            self.he_list.append(state[0][2].item())
+        else:
+            self.get_logger().warning("Received empty state tensor")
         #self.get_logger().info(f'normalized_state: {normalized_state}')
 
         #if msg.is_terminal_state:
@@ -324,42 +333,43 @@ class SAC(Node):
     def terminal_state_callback(self, msg):
         self.end_episode()
     def end_episode(self):
-        for transition in self.current_episode:
-            self.replay_buffer.push(*transition)
+        if len(self.current_episode) < 8:
+            self.get_logger().warn(f"Episode {self.episode_count} discarded: only {len(self.current_episode)} transitions.")
+        else:
+            for transition in self.current_episode:
+                self.replay_buffer.push(*transition)
 
-        self.get_logger().info(f'Episode {self.episode_count} finished with total reward: {self.episode_rewards}')
-        self.episode_rewards_list.append((self.episode_count, self.episode_rewards))
-        self.train()
+            self.get_logger().info(f'Episode {self.episode_count} finished with total reward: {self.episode_rewards}')
+            self.episode_rewards_list.append((self.episode_count, self.episode_rewards))
+
+            # Optionally train only if episode is valid
+            self.train()
+            self.episode_count += 1
+
         # Reset for the next episode
         self.current_episode = []
         self.episode_rewards = 0
         self.current_step = 0
-        self.episode_count += 1
         self.episode_succeeded = False
 
     def reset_uhlennoise(self):
         self.noise_process.reset()
     def state_callback(self, msg):
-        #if not self.saved_motions_active:
-        # Convert the received data to a tensor
         input_tensor = torch.tensor(msg.data, dtype=torch.float32).view(1, -1)
-
-        normalized_input = self.normalize_input(input_tensor)
-        #self.get_logger().info(f'normalized_input: {normalized_input}')
-        #output_tensor, _ = self.actor.sample(normalized_input)
-        output_tensor= self.actor(normalized_input)[0]
+        #normalized_input = self.normalize_input(input_tensor)
+        output_tensor= self.actor(input_tensor)[0]
         noise=self.noise_process()
 
         self.output_tensor.append(output_tensor[0].detach().numpy())
 
-        output_tensor = output_tensor[0]+ noise
-
+        #output_tensor = output_tensor[0]+ noise
+        output_tensor = output_tensor[0]
         self.output_tensor_noise.append(output_tensor.detach().numpy())
         #self.get_logger().info(f'output_tensor: {output_tensor}')
         twist_msg = Twist()
         twist_msg.linear.x = output_tensor[0].item()
-        twist_msg.linear.y = output_tensor[1].item()
-        twist_msg.angular.z = output_tensor[2].item()
+        #twist_msg.linear.y = output_tensor[1].item()
+        twist_msg.angular.z = output_tensor[1].item()
         self.tensor_action_publisher.publish(twist_msg)
         #self.get_logger().info(f'noise: {noise}')
 
@@ -430,14 +440,14 @@ class SAC(Node):
                             output_array = np.array(self.output_tensor)  # Convert to NumPy array
                             noise_array = np.array(self.output_tensor_noise)
 
-                            for i in range(3):  # x, y, z components
+                            for i in range(2):  # x, y, z components
                                 #row = (i+1) // 2
                                 #col = (i+1) % 2
                                 axs[i+1, 0].clear()
                                 axs[i+1, 0].plot(output_array[:, i], label=f'Action {i} (Output)', color='blue')
                                 axs[i+1, 0].plot(noise_array[:, i], label=f'Action {i} (Output + Noise)', linestyle='dashed', color='orange')
                                 axs[i+1, 0].set_xlabel('Steps')
-                                axs[i+1, 0].set_ylabel(f'Velocity {["X", "Y", "Z"][i]}')
+                                axs[i+1, 0].set_ylabel(f'Velocity {["X","Z"][i]}')
                                 axs[i+1, 0].legend()
                         # Plot Episodes total rewars
                         if len(self.episode_rewards_list) > 0:
